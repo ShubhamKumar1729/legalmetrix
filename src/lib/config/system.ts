@@ -85,15 +85,20 @@ export const defaultSystemConfig: SystemConfig = {
   },
 };
 
-// In-memory config store for demo
-let currentConfig: SystemConfig = { ...defaultSystemConfig };
+// In-memory config store for demo — pinned to globalThis so all route
+// bundles share one config (same reason as the memory store).
+const gc = globalThis as unknown as { __legalmetrixConfig?: SystemConfig };
+function currentConfigRef(): SystemConfig {
+  return (gc.__legalmetrixConfig ??= JSON.parse(JSON.stringify(defaultSystemConfig)));
+}
 
 export function getSystemConfig(): SystemConfig {
-  return currentConfig;
+  return currentConfigRef();
 }
 
 export function updateSystemConfig(updates: Partial<SystemConfig>): SystemConfig {
-  currentConfig = {
+  const currentConfig = currentConfigRef();
+  gc.__legalmetrixConfig = {
     ...currentConfig,
     ...updates,
     ai: { ...currentConfig.ai, ...(updates.ai || {}) },
@@ -101,5 +106,5 @@ export function updateSystemConfig(updates: Partial<SystemConfig>): SystemConfig
     inspection: { ...currentConfig.inspection, ...(updates.inspection || {}) },
     system: { ...currentConfig.system, ...(updates.system || {}) },
   };
-  return currentConfig;
+  return gc.__legalmetrixConfig;
 }

@@ -116,3 +116,6 @@ public/worker-*.js
 .venv/
 .vite/
 __pycache__/
+
+tsconfig.tsbuildinfo
+uploads/

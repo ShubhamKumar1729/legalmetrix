@@ -1,57 +1,72 @@
 /**
- * Critical Workflow Tests — PackComply SIH 26034
- * Run with: npm test (if jest configured) or node --loader tsx
+ * Critical workflow tests — LegalMetrix
+ * Run with: npm test
+ *
+ * These cover the two pure engines the whole product stands on:
+ * the safe rule evaluator and compliance scoring, plus the mock AI contract.
  */
-
 import { evaluateCondition } from '../src/lib/rules/evaluator';
 import { calculateComplianceScore } from '../src/lib/rules/scoring';
+import { MockAIProvider } from '../src/lib/ai/mock-provider';
+import { describeLogic } from '../src/lib/ui/labels';
 
-console.log('=== PackComply Critical Tests ===');
+let failed = 0;
+function check(name: string, cond: boolean) {
+  if (cond) console.log(`  ✓ ${name}`);
+  else { console.error(`  ✗ FAILED: ${name}`); failed++; }
+}
 
-// Test 1: Rule Evaluator - exists
-const test1 = evaluateCondition({ field: 'mrp', operator: 'exists' }, { mrp: '₹99' });
-console.assert(test1.passed === true, 'Test 1 Failed: exists should pass');
-console.log('✓ Test 1: exists operator');
+console.log('=== LegalMetrix critical tests ===');
 
-// Test 2: Rule Evaluator - not_exists
-const test2 = evaluateCondition({ field: 'mrp', operator: 'not_exists' }, { mrp: '' });
-console.assert(test2.passed === true, 'Test 2 Failed: not_exists should pass for empty');
-console.log('✓ Test 2: not_exists operator');
+// 1. exists
+check('exists passes when field present',
+  evaluateCondition({ field: 'mrp', operator: 'exists' }, { mrp: '₹99' }).passed === true);
 
-// Test 3: AND logic
-const test3 = evaluateCondition({
-  logic: 'AND',
-  conditions: [
-    { field: 'category', operator: 'in', value: ['FOOD'] },
-    { field: 'net_quantity_value', operator: 'gte', value: 100 }
-  ]
-}, { category: 'FOOD', net_quantity_value: 500 });
-console.assert(test3.passed === true, 'Test 3 Failed: AND should pass');
-console.log('✓ Test 3: AND logic');
+// 2. not_exists
+check('not_exists passes for empty value',
+  evaluateCondition({ field: 'mrp', operator: 'not_exists' }, { mrp: '' }).passed === true);
 
-// Test 4: Compliance Scoring
-const findings: any[] = [
+// 3. AND logic
+check('AND passes when both hold',
+  evaluateCondition({
+    logic: 'AND',
+    conditions: [
+      { field: 'category', operator: 'in', value: ['FOOD'] },
+      { field: 'net_quantity_value', operator: 'gte', value: 100 },
+    ],
+  }, { category: 'FOOD', net_quantity_value: 500 }).passed === true);
+
+// 4. scoring stays in 0..100
+const score = calculateComplianceScore([
   { status: 'PASS', severity: 'CRITICAL', confidence: 98 },
   { status: 'VIOLATION', severity: 'HIGH', confidence: 94 },
   { status: 'REVIEW', severity: 'CRITICAL', confidence: 71 },
-];
-const score = calculateComplianceScore(findings);
-console.assert(score >= 0 && score <= 100, 'Test 4 Failed: score out of range');
-console.log(`✓ Test 4: Compliance scoring = ${score}/100`);
+] as any);
+check(`score in range (got ${score})`, score >= 0 && score <= 100);
 
-// Test 5: Mock AI deterministic
-import { MockAIProvider } from '../src/lib/ai/mock-provider';
-const mock = new MockAIProvider();
-mock.analyze({
-  inspectionId: 'insp-001',
-  imageIds: ['img-1'],
-  imageUrls: ['/api/placeholder/image?text=Test'],
-  productMetadata: { productName: 'FreshBite Premium Biscuits' },
-  ruleSetVersion: 'LM-PC-2011-v1.2'
-}).then(res => {
-  console.assert(res.extractedFields.length > 0, 'Test 5 Failed: should return fields');
-  console.assert(res.findings.length > 0, 'Test 5 Failed: should return findings');
-  console.assert(res.confidence.average > 0, 'Test 5 Failed: confidence');
-  console.log(`✓ Test 5: Mock AI returns ${res.extractedFields.length} fields, ${res.findings.length} findings, avg conf ${res.confidence.average}%`);
-  console.log('=== All Critical Tests Passed ===');
-});
+// 5. plain-language rule description never crashes on odd input
+check('describeLogic handles nested conditions',
+  describeLogic({ logic: 'AND', conditions: [{ field: 'mrp', operator: 'exists' }] }).includes('MRP'));
+
+async function main() {
+  // 6. Mock AI provider honors the integration contract
+  const mock = new MockAIProvider();
+  const res = await mock.analyze({
+    inspectionId: 'insp-001',
+    imageIds: ['img-1'],
+    imageUrls: ['/api/placeholder/image?text=Test'],
+    productMetadata: { productName: 'FreshBite Premium Biscuits' },
+    ruleSetVersion: 'LM-PC-2011-v1.2',
+  });
+  check('AI response has extracted fields', res.extractedFields.length > 0);
+  check('AI response has findings', res.findings.length > 0);
+  check('AI response has stages (pipeline UI feed)', res.stages.length > 0);
+  check('AI confidence is a sane average', res.confidence.average > 0 && res.confidence.average <= 100);
+  check('AI response carries model metadata for traceability', !!res.modelMetadata.modelVersion);
+  check('every finding links a rule code', res.findings.every(f => !!f.ruleCode));
+
+  if (failed > 0) { console.error(`\n${failed} test(s) FAILED`); process.exit(1); }
+  console.log('\n=== All critical tests passed ===');
+}
+
+main().catch(e => { console.error('Test run crashed:', e); process.exit(1); });

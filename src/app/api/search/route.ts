@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardRequest } from '@/lib/auth/session';
 import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
 
 export async function GET(req: NextRequest) {
+  const denied = guardRequest(req, ); if (denied) return denied;
   await seedMemoryDB();
   const { searchParams } = new URL(req.url);
   const q = searchParams.get('q')?.toLowerCase() || '';

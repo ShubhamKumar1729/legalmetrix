@@ -1,4 +1,4 @@
-# Security — PackComply
+# Security — LegalMetrix
 
 ## Authentication
 
@@ -6,8 +6,9 @@
 - **Storage:** passwordHash never returned to client, never in logs
 - **Demo Password:** `Gov@2026` for all demo users, hashed via bcrypt
 - **JWT:** `jsonwebtoken` with `AUTH_SECRET` (min 32 chars), expiry 7d via `AUTH_EXPIRES_IN`
-- **Token Verification:** `verifyToken()` checks signature, expiry
-- **Session:** For demo, token in localStorage; production should use httpOnly secure cookie + CSRF protection
+- **Token Verification:** signature + expiry checked on **every protected API request** (`src/lib/auth/session.ts`)
+- **Session:** httpOnly, SameSite=Lax `lm_session` cookie set by the login route (secure flag in production) — plus optional `Authorization: Bearer` for API clients. localStorage only holds a copy for display; it is never trusted alone
+- **Passwords:** demo seed users carry a real bcrypt hash; users created via the admin UI are verified against their own hash (no plaintext shortcut anymore)
 
 ## RBAC
 
@@ -38,14 +39,14 @@ Permissions:
 
 ### Enforcement
 
-- **Frontend:** `canAccessRoute()` checks role vs path, redirects to login if no token
-- **Backend:** Every API route should call `hasPermission(role, permission)` — currently implemented for critical routes, TODO for all
-- **Never trust frontend:** Backend is source of truth
+- **Backend (source of truth):** every route handler calls `guardRequest(req, permission)` from `src/lib/auth/session.ts` — 401 without a session, 403 when the role lacks the permission. Covered: inspections (read/create/update/analyze/review decisions), products, analytics, reports, rules, users, audit logs, configuration, ecommerce analysis, search, evidence upload/serve
+- **Frontend:** `canAccessRoute()` mapping + AppShell redirect exist only to avoid dead-end screens; hiding a button is never the security boundary (e.g. the review panel renders read-only with an explanation for roles lacking `review:write`)
+- Verified in tests/manual QA: officer curl-ing a reviewer decision endpoint gets 403 even with a valid session
 
 ## Input Validation
 
-- **Zod schemas** shared frontend/backend (planned, currently manual validation)
-- **File Validation:** mime type check (image/jpeg, png, webp), size limit (10MB), no executable
+- **Zod schemas** on login and user creation (`zod`); other endpoints validate required fields and return 400 with a human-readable message (all copy on screen is plain language)
+- **File Validation:** mime type check (image/jpeg, png, webp), size limit (10MB), no executable; evidence served through an authenticated route with `path.basename` traversal guard
 - **Barcode:** alphanumeric, max 50 chars
 - **URL:** valid URL format for ecommerce
 - **Rule DSL:** validated via `evaluateCondition` — only allowed operators, no eval, no Function constructor
@@ -62,9 +63,9 @@ Permissions:
 Via `next.config.mjs`:
 
 ```
-X-Frame-Options: DENY
 X-Content-Type-Options: nosniff
 Referrer-Policy: strict-origin-when-cross-origin
+X-Frame-Options: DENY (production) | SAMEORIGIN (dev, so local previews/embeds work)
 ```
 
 Future: Content-Security-Policy, Strict-Transport-Security, etc.
@@ -106,15 +107,16 @@ Future: Content-Security-Policy, Strict-Transport-Security, etc.
 
 ## CSRF Protection
 
-- For cookie-based auth, need CSRF tokens
-- Currently token in localStorage, so CSRF less relevant, but XSS more critical
-- Production should use httpOnly cookie + SameSite=Strict + CSRF token
+- Cookie is SameSite=Lax (state-changing requests are POST/PATCH via fetch — not top-level navigations), JSON-only endpoints reject `multipart`/form posts, and all fetches are same-origin. For a stricter posture, move to SameSite=Strict or add double-submit tokens when real enforcement data is wired in
 
 ## Dependency Security
 
-- `npm audit` regularly
-- Pin versions in package.json
-- No known vulnerabilities in used packages (Next.js 14.2.5, mongoose 8.4.4, etc.)
+Current audit posture (Sep 2026):
+
+- **Fixed by this repo:** `jspdf` removed entirely (unused — report export is plain text; its DOMPurify XSS/ReDoS chain left with it), `uuid` bumped (buffer bounds fix), `postcss` overridden to ≥8.5, `minimatch` (ReDoS) overridden, `next` on latest 14.2.x
+- **Accepted, dev-only:** `@next/eslint-plugin-next` → `glob` CLI advisory — lint tooling only, not part of the runtime bundle, never invoked with untrusted patterns
+- **Open, documented:** one `next` advisory (cache poisoning / image-optimization DoS) whose patch line is Next 15.x; this app does not use `next/image` optimization or shared response caches, and a major Next upgrade is deliberately out of scope here. Re-run `npm audit` when Next 15 is adopted
+- `npm audit` should be re-checked per release
 
 ## Data Privacy
 

@@ -56,7 +56,7 @@ const rolePermissions: Record<Role, Permission[]> = {
     'inspection:read','inspection:update',
     'review:read','review:write',
     'product:read','product:history',
-    'report:read',
+    'report:read','report:write',
     'rule:read'
   ],
   ANALYST: [

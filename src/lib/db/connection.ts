@@ -1,43 +1,56 @@
 import mongoose from 'mongoose';
 
+/**
+ * MongoDB connection with graceful, FAST fallback to the in-memory demo store.
+ *
+ * Rules:
+ *  - Never block a request for more than ~2s waiting on a DB that isn't there.
+ *  - Remember a failed attempt (negative cache) so every API call doesn't pay it again.
+ *  - bufferCommands:false so a query can never silently queue forever.
+ */
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/sih-compliance';
 
 let isConnected = false;
+let connectAttempted = false;
+let inflight: Promise<boolean> | null = null;
+
+async function attemptConnect(): Promise<boolean> {
+  const state = () => mongoose.connection.readyState as number;
+  try {
+    if (state() === 1) {
+      isConnected = true;
+      return true;
+    }
+    if (state() === 0) {
+      await mongoose.connect(MONGODB_URI, {
+        serverSelectionTimeoutMS: 2000,
+        bufferCommands: false,
+      });
+    }
+    isConnected = state() === 1;
+    return isConnected;
+  } catch (e) {
+    console.log('MongoDB not available — using in-memory demo store.');
+    isConnected = false;
+    return false;
+  }
+}
 
 export async function connectDB(): Promise<boolean> {
   if (isConnected) return true;
-  
-  // If no URI or explicitly disabled, fallback to memory
-  if (!MONGODB_URI || process.env.NEXT_PUBLIC_DEMO_MODE === 'true') {
-    // In demo mode, we use memory store by default, but try mongo if available
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(MONGODB_URI, {
-          serverSelectionTimeoutMS: 2000,
-        });
-        isConnected = true;
-        console.log('MongoDB connected');
-        return true;
-      }
-    } catch (e) {
-      console.log('MongoDB not available, using in-memory store');
-      return false;
-    }
+  if (connectAttempted) return false; // failed already → don't retry on every request
+  if (!inflight) {
+    inflight = attemptConnect().finally(() => {
+      connectAttempted = true;
+      inflight = null;
+    });
   }
+  return inflight;
+}
 
-  try {
-    if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(MONGODB_URI);
-      isConnected = true;
-      console.log('MongoDB connected');
-    } else {
-      isConnected = true;
-    }
-    return true;
-  } catch (error) {
-    console.warn('MongoDB connection failed, using in-memory store:', error);
-    return false;
-  }
+/** Let tests/demo tooling reset the negative cache. */
+export function resetDBAttempt() {
+  connectAttempted = false;
 }
 
 export function isDBConnected() {

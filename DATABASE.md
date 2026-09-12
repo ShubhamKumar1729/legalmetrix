@@ -1,4 +1,4 @@
-# Database Design — PackComply
+# Database Design — LegalMetrix
 
 ## Overview
 

@@ -3,6 +3,7 @@
  * Production would use MongoDB via Mongoose
  */
 import { v4 as uuidv4 } from 'uuid';
+import bcrypt from 'bcryptjs';
 
 class MemoryCollection<T extends { id: string }> {
   private items: Map<string, T> = new Map();
@@ -84,21 +85,42 @@ class MemoryCollection<T extends { id: string }> {
 
 import type { Inspection, RegulatoryRule, User, AuditLog, EcommerceListing } from '@/types';
 
-export const memoryDB = {
-  users: new MemoryCollection<User>(),
-  inspections: new MemoryCollection<Inspection>(),
-  rules: new MemoryCollection<RegulatoryRule>(),
-  auditLogs: new MemoryCollection<AuditLog>(),
-  ecommerceListings: new MemoryCollection<EcommerceListing>(),
-  products: new MemoryCollection<any>(),
-  reports: new MemoryCollection<any>(),
-  notifications: new MemoryCollection<any>(),
-};
+function createMemoryDB() {
+  return {
+    users: new MemoryCollection<User>(),
+    inspections: new MemoryCollection<Inspection>(),
+    rules: new MemoryCollection<RegulatoryRule>(),
+    auditLogs: new MemoryCollection<AuditLog>(),
+    ecommerceListings: new MemoryCollection<EcommerceListing>(),
+    products: new MemoryCollection<any>(),
+    reports: new MemoryCollection<any>(),
+    notifications: new MemoryCollection<any>(),
+  };
+}
+
+/**
+ * IMPORTANT: pinned to globalThis so every route bundle shares ONE store.
+ * Without this, Next.js dev mode compiles each API route into its own module
+ * graph, each route gets a fresh copy of the data, and created inspections
+ * would be "not found" by the analyze route.
+ */
+const g = globalThis as unknown as { __legalmetrixMemoryDB?: ReturnType<typeof createMemoryDB> };
+export const memoryDB = (g.__legalmetrixMemoryDB ??= createMemoryDB());
+
+let seeding: Promise<void> | null = null;
 
 export async function seedMemoryDB() {
   if (memoryDB.users.all().length > 0) return;
+  if (seeding) return seeding;
+  seeding = doSeed().finally(() => { seeding = null; });
+  return seeding;
+}
+
+async function doSeed() {
+  if (memoryDB.users.all().length > 0) return;
 
   const now = new Date().toISOString();
+  const demoHash = bcrypt.hashSync('Gov@2026', 10);
 
   // Users
   const users: User[] = [
@@ -146,7 +168,7 @@ export async function seedMemoryDB() {
     },
   ];
 
-  for (const u of users) await memoryDB.users.create(u);
+  for (const u of users) await memoryDB.users.create({ ...u, passwordHash: demoHash } as any);
 
   // Rules - LM-PC-2011
   const rules: RegulatoryRule[] = [

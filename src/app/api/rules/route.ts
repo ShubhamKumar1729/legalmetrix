@@ -1,15 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardRequest } from '@/lib/auth/session';
 import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
 import { v4 as uuidv4 } from 'uuid';
 import { logAudit } from '@/lib/audit/audit';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const denied = guardRequest(req, 'rule:read'); if (denied) return denied;
   await seedMemoryDB();
   const rules = memoryDB.rules.all().sort((a, b) => a.ruleCode.localeCompare(b.ruleCode));
   return NextResponse.json({ success: true, data: rules });
 }
 
 export async function POST(req: NextRequest) {
+  const denied = guardRequest(req, 'rule:write'); if (denied) return denied;
   await seedMemoryDB();
   const body = await req.json();
 

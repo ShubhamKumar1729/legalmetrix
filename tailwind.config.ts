@@ -2,6 +2,10 @@ import type { Config } from "tailwindcss";
 
 const config: Config = {
   darkMode: ["class"],
+  // NOTE: This project bans blue-family colors (blue/sky/indigo/cyan/violet and
+  // blue-tinted grays like slate). Neutrals must be "stone" (warm), primary is
+  // emerald via CSS variables in globals.css. Prefer the semantic tokens
+  // (primary, muted, background…) so the palette stays changeable in one place.
   content: [
     "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/components/**/*.{js,ts,jsx,tsx,mdx}",

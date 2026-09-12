@@ -1,4 +1,32 @@
-# API Documentation — PackComply
+# API Documentation — LegalMetrix
+
+## Authentication (required on every endpoint except login/placeholder)
+
+Every route except `POST /api/auth/login` and `GET /api/placeholder/*` requires a session:
+the browser sends the **httpOnly `lm_session` cookie** automatically; API clients can use
+`Authorization: Bearer <jwt>`. Sensitive routes also require an RBAC permission
+(`review:write`, `rule:write`, `config:write`, `user:read`, `audit:read`, …) — 401 without
+a session, 403 with an insufficient role. `GET /api/auth/me` returns the current session.
+
+## Endpoints added for the human-review + model-integration flows
+
+| Method & Path | Permission | Purpose |
+|---|---|---|
+| `POST /api/auth/logout` | session | Clears the session cookie (audited) |
+| `GET  /api/auth/me` | session | Who am I (used by TopNav/profile) |
+| `POST /api/uploads` | inspection:create | Multipart `file` (+`side`) evidence upload; type/size validated |
+| `GET  /api/uploads/{file}` | session cookie | Serves stored evidence image (path-traversal safe) |
+| `POST /api/inspections/[id]/findings/[findingId]` | review:write | Human decision: `{decision: ACCEPT\|REJECT\|CORRECT, correctedValue?, comment?}` → updates finding, re-scores, audit-logs the AI-vs-human delta |
+| `GET  /api/inspections/[id]/results` | inspection:read | Poll AI results (`ready` flag) for async/long model runs |
+| `GET/POST /api/ai/status` | session | Which AI provider is active / run a live health test |
+| `GET /api/search?q=` | session | Combined inspection/product/rule search (TopNav box) |
+| `POST /api/users` | user:write | Create user (zod-validated, bcrypt hash) |
+| `PATCH /api/users` | user:write | Enable/disable or change role |
+
+Note: `POST /api/inspections/[id]/analyze` now routes through the provider registry
+(mock or your real model via `AI_PROVIDER=real`) and persists `aiModelMetadata`
+(provider, model name/version, processedAt, processingTimeMs) on the inspection for
+report traceability.
 
 ## Base URL
 

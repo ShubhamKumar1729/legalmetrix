@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardRequest } from '@/lib/auth/session';
 import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+  const denied = guardRequest(req, 'product:history'); if (denied) return denied;
   await seedMemoryDB();
   const product = await memoryDB.products.findById(params.id);
   if (!product) return NextResponse.json({ success: false, error: { message: 'Not found' } }, { status: 404 });

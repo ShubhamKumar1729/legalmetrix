@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardRequest } from '@/lib/auth/session';
 import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
 import { connectDB, isDBConnected } from '@/lib/db/connection';
 import { InspectionModel } from '@/lib/db/models';
@@ -6,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { logAudit } from '@/lib/audit/audit';
 
 export async function GET(req: NextRequest) {
+  const denied = guardRequest(req, 'inspection:read'); if (denied) return denied;
   await seedMemoryDB();
   const { searchParams } = new URL(req.url);
   const status = searchParams.get('status');
@@ -51,6 +53,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const denied = guardRequest(req, 'inspection:create'); if (denied) return denied;
   await seedMemoryDB();
   try {
     const body = await req.json();

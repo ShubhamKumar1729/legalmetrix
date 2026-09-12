@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardRequest } from '@/lib/auth/session';
 import { v4 as uuidv4 } from 'uuid';
 
 export async function POST(req: NextRequest) {
+  const denied = guardRequest(req, 'ecommerce:analyze'); if (denied) return denied;
   const { url, packageInspectionId } = await req.json();
 
   if (!url) {

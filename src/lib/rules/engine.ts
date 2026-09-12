@@ -47,9 +47,9 @@ export class RuleEngine {
           query.version = ruleSetVersion.replace('LM-PC-2011-v', '').replace('v', '');
           // For simplicity, if version specified, filter by it, else get latest
         }
-        const rules = await RegulatoryRuleModel.find(query).sort({ ruleCode: 1 });
+        const rules: any[] = await RegulatoryRuleModel.find(query).sort({ ruleCode: 1 });
         if (rules.length > 0) {
-          return rules.map(r => ({
+          return rules.map((r: any) => ({
             id: r._id.toString(),
             ruleCode: r.ruleCode,
             title: r.title,

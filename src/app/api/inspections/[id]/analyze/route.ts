@@ -1,32 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
-import { mockAIProvider } from '@/lib/ai/mock-provider';
+import { analyzeWithAI, aiRegistry } from '@/lib/ai/provider';
 import { ruleEngine } from '@/lib/rules/engine';
-import { calculateComplianceScore, getComplianceStatus } from '@/lib/rules/scoring';
+import { calculateComplianceScore } from '@/lib/rules/scoring';
 import { logAudit } from '@/lib/audit/audit';
+import { guardRequest } from '@/lib/auth/session';
 
+/**
+ * POST /api/inspections/[id]/analyze
+ *
+ * Runs the AI pipeline for an inspection through the provider registry
+ * (mock by default; set AI_PROVIDER=real + AI_SERVICE_URL to use your model —
+ * see MODEL_INTEGRATION.md), then re-validates against the rule engine,
+ * scores, routes to human review, and updates the inspection record.
+ */
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+  const denied = guardRequest(req, 'inspection:update');
+  if (denied) return denied;
+
   await seedMemoryDB();
-  const inspectionIdParam = params.id;
 
-  let inspection = await memoryDB.inspections.findById(inspectionIdParam);
+  let inspection = await memoryDB.inspections.findById(params.id);
   if (!inspection) {
-    const all = memoryDB.inspections.all();
-    inspection = all.find(i => i.inspectionId === inspectionIdParam) || null;
+    inspection = memoryDB.inspections.all().find(i => i.inspectionId === params.id) || null;
   }
-
   if (!inspection) {
     return NextResponse.json({ success: false, error: { message: 'Inspection not found' } }, { status: 404 });
   }
 
   try {
-    // Update to processing
     await memoryDB.inspections.update(inspection.id, {
-      status: 'PROCESSING' as any,
+      status: 'PROCESSING',
       updatedAt: new Date().toISOString(),
     });
 
-    // Call Mock AI Provider
     const aiRequest = {
       inspectionId: inspection.id,
       imageIds: inspection.images.map(img => img.id),
@@ -42,13 +49,26 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         enableMultilingual: true,
         enableFontAnalysis: true,
         enableTamperingDetection: true,
-      }
+      },
     };
 
-    const aiResult = await mockAIProvider.analyze(aiRequest);
+    // Route through the registry so the configured provider (mock | real | custom) is used.
+    const aiResult = await analyzeWithAI(aiRequest);
 
-    // Run rule engine on top of AI results (defense in depth)
-    // The mock provider already returns findings, but we also run engine for real logic
+    // A long-running model may respond "still processing" with a runId — the client
+    // polls GET /api/inspections/[id]/results until a final status arrives.
+    if (aiResult.processingStatus === 'PROCESSING') {
+      const pending = await memoryDB.inspections.update(inspection.id, {
+        status: 'PROCESSING',
+        aiRunId: aiResult.runId,
+        aiModelMetadata: aiResult.modelMetadata,
+        updatedAt: new Date().toISOString(),
+      });
+      return NextResponse.json({ success: true, data: { inspection: pending, aiResult, pending: true } });
+    }
+
+    // Run the rule engine on the AI's extracted fields (defense in depth:
+    // regulatory logic always re-validated server-side, never trusted from the model alone).
     const ruleResult = await ruleEngine.evaluate({
       extractedFields: aiResult.extractedFields,
       productMetadata: {
@@ -60,38 +80,28 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       ruleSetVersion: inspection.ruleSetVersion,
     });
 
-    // Merge AI findings with rule engine (use AI findings for demo reliability)
     const findings = aiResult.findings.length > 0 ? aiResult.findings : ruleResult.findings;
-    const complianceScore = aiResult.findings.length > 0 
-      ? Math.round(findings.filter(f => f.status === 'PASS').length / Math.max(1, findings.length) * 100 * 0.8 + 20) // deterministic
-      : ruleResult.complianceScore;
-
-    // For FreshBite demo, force 82
-    let finalScore = complianceScore;
-    if (inspection.productName.toLowerCase().includes('freshbite')) {
-      finalScore = 82;
-    } else if (findings.length === 0) {
-      finalScore = 95;
-    } else {
-      // Calculate properly
-      const hasViolation = findings.some(f => f.status === 'VIOLATION');
-      const hasReview = findings.some(f => f.status === 'REVIEW');
-      if (hasViolation && findings.filter(f => f.status === 'VIOLATION').length >= 2) finalScore = 45;
-      else if (hasViolation) finalScore = 68;
-      else if (hasReview) finalScore = 82;
-      else finalScore = 96;
-    }
 
     const hasViolation = findings.some(f => f.status === 'VIOLATION');
     const hasReview = findings.some(f => f.status === 'REVIEW');
-    let finalStatus: any = 'COMPLIANT';
+
+    // Score from the findings via the shared scoring module (configurable weights).
+    let finalScore = findings.length > 0
+      ? calculateComplianceScore(findings)
+      : ruleResult.complianceScore || 95;
+
+    let finalStatus: 'COMPLIANT' | 'NON_COMPLIANT' | 'REVIEW_REQUIRED' = 'COMPLIANT';
     if (hasViolation) finalStatus = 'NON_COMPLIANT';
     else if (hasReview) finalStatus = 'REVIEW_REQUIRED';
 
-    // Override for demo data consistency
-    if (inspection.productName.toLowerCase().includes('freshbite')) finalStatus = 'REVIEW_REQUIRED';
-    if (inspection.productName.toLowerCase().includes('pureharvest')) finalStatus = 'COMPLIANT';
-    if (inspection.productName.toLowerCase().includes('cleancare')) finalStatus = 'NON_COMPLIANT';
+    // Deterministic overrides exist ONLY for the mock provider in demo mode so the
+    // jury demo is 100% reproducible. Real model results are never overridden.
+    if (aiRegistry.getProviderName() === 'mock' && process.env.NEXT_PUBLIC_DEMO_MODE === 'true') {
+      const lower = (inspection.productName || '').toLowerCase();
+      if (lower.includes('freshbite')) { finalScore = 82; finalStatus = 'REVIEW_REQUIRED'; }
+      else if (lower.includes('pureharvest')) { finalScore = 96; finalStatus = 'COMPLIANT'; }
+      else if (lower.includes('cleancare')) { finalScore = 45; finalStatus = 'NON_COMPLIANT'; }
+    }
 
     const updated = await memoryDB.inspections.update(inspection.id, {
       status: finalStatus,
@@ -105,6 +115,8 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       findings,
       extractedFields: aiResult.extractedFields,
       aiRunId: aiResult.runId,
+      aiModelMetadata: aiResult.modelMetadata,
+      ruleSetVersion: ruleResult.ruleSetVersion,
       reviewStatus: hasReview || hasViolation ? 'PENDING' : 'NOT_REQUIRED',
       completedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -117,28 +129,28 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       action: 'AI_ANALYSIS_COMPLETED',
       resource: 'INSPECTION',
       resourceId: inspection.id,
-      newValue: { 
-        aiRunId: aiResult.runId, 
+      newValue: {
+        aiRunId: aiResult.runId,
+        modelProvider: aiResult.modelMetadata.provider,
         modelVersion: aiResult.modelMetadata.modelVersion,
         complianceScore: finalScore,
         findingsCount: findings.length,
       },
     });
 
-    return NextResponse.json({ 
-      success: true, 
-      data: {
-        inspection: updated,
-        aiResult,
-        ruleResult,
-      }
+    return NextResponse.json({
+      success: true,
+      data: { inspection: updated, aiResult, ruleResult },
     });
   } catch (e) {
     console.error('Analyze error', e);
     await memoryDB.inspections.update(inspection.id, {
-      status: 'DRAFT' as any,
+      status: 'DRAFT',
       updatedAt: new Date().toISOString(),
     });
-    return NextResponse.json({ success: false, error: { message: 'AI analysis failed' } }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: { message: 'AI analysis failed. The inspection was reset to draft — you can retry.' } },
+      { status: 500 }
+    );
   }
 }

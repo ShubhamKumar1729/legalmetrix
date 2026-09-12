@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardRequest } from '@/lib/auth/session';
 import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+  const denied = guardRequest(req, 'inspection:read'); if (denied) return denied;
   await seedMemoryDB();
   const id = params.id;
 
@@ -20,6 +22,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+  const denied = guardRequest(req, 'inspection:update'); if (denied) return denied;
   await seedMemoryDB();
   const id = params.id;
   const body = await req.json();

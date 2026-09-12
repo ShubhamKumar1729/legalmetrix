@@ -1,4 +1,4 @@
-# Rule Engine — PackComply
+# Rule Engine — LegalMetrix
 
 ## Philosophy
 

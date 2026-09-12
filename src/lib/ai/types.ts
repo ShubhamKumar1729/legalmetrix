@@ -55,6 +55,8 @@ export interface AIAnalyzeResponse {
     processedAt: string;
     processingTimeMs: number;
   };
+  /** Only set when processingStatus === 'FAILED' (see MODEL_INTEGRATION.md). */
+  error?: { code: string; message: string; details?: any };
 }
 
 export interface AIModelProvider {

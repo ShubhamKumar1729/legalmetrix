@@ -1,7 +1,9 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
+import { guardRequest } from '@/lib/auth/session';
 import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const denied = guardRequest(req, ); if (denied) return denied;
   await seedMemoryDB();
   const inspections = memoryDB.inspections.all();
   const products = memoryDB.products.all();

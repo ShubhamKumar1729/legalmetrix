@@ -1,4 +1,4 @@
-"use client";
+'use client';
 import { useState, useEffect } from 'react';
 import { Sidebar } from './sidebar';
 import { TopNav } from './top-nav';
@@ -9,17 +9,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     setMounted(true);
-    // Check auth
+    // The real check happens on the server (every API call is guarded);
+    // this only saves a render for obviously-signed-out visitors.
     const token = localStorage.getItem('token');
     if (!token) {
       window.location.href = '/login';
     }
   }, []);
 
-  if (!mounted) return <div className="min-h-screen bg-slate-50 flex items-center justify-center">Loading...</div>;
+  if (!mounted) {
+    return <div className="min-h-screen bg-stone-50 flex items-center justify-center text-sm text-muted-foreground">Loading…</div>;
+  }
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] flex">
+    <div className="min-h-screen bg-stone-50 flex">
       <Sidebar collapsed={collapsed} setCollapsed={setCollapsed} />
       <div className="flex-1 flex flex-col min-w-0">
         <TopNav />

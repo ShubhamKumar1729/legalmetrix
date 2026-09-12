@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardRequest } from '@/lib/auth/session';
 import { getAuditLogs } from '@/lib/audit/audit';
 import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
 
 export async function GET(req: NextRequest) {
+  const denied = guardRequest(req, 'audit:read'); if (denied) return denied;
   await seedMemoryDB();
   const { searchParams } = new URL(req.url);
   const resource = searchParams.get('resource') || undefined;

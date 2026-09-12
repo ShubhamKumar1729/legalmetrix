@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { guardRequest } from '@/lib/auth/session';
 import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
 import { v4 as uuidv4 } from 'uuid';
 
 export async function GET(req: NextRequest) {
+  const denied = guardRequest(req, 'report:read'); if (denied) return denied;
   await seedMemoryDB();
   const inspections = memoryDB.inspections.all();
   
@@ -20,13 +22,16 @@ export async function GET(req: NextRequest) {
     inspector: ins.inspectorName,
     date: ins.createdAt,
     ruleVersion: ins.ruleSetVersion,
-    aiModel: 'mock-vision-v0.1.0',
+    aiModel: (ins as any).aiModelMetadata
+      ? `${(ins as any).aiModelMetadata.modelName} ${(ins as any).aiModelMetadata.modelVersion}`
+      : 'mock-vision-v0.1.0',
   }));
 
   return NextResponse.json({ success: true, data: reports });
 }
 
 export async function POST(req: NextRequest) {
+  const denied = guardRequest(req, 'report:write'); if (denied) return denied;
   await seedMemoryDB();
   const { inspectionId } = await req.json();
   

@@ -99,6 +99,8 @@ export interface Inspection {
   startedAt: string;
   completedAt?: string;
   aiRunId?: string;
+  /** Which model produced this assessment — stored for report traceability. */
+  aiModelMetadata?: Record<string, unknown>;
   ruleSetVersion: string;
   complianceScore: number;
   confidenceSummary: {

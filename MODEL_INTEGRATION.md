@@ -1,12 +1,23 @@
 # AI Model Integration Contract — PackComply
 
-## Overview
+## Overview — the integration is ALREADY wired
 
-The platform is designed so the real AI/ML model team can integrate without rebuilding frontend. The contract is via `AIModelProvider` interface and `/api/ai/analyze` abstraction (implemented as `/api/inspections/[id]/analyze` calling the provider).
+You do **not** need to write any platform code. The HTTP adapter for external
+model services is implemented at `src/lib/ai/http-provider.ts` and registered in
+the registry as provider name **`real`**. Your model team only implements the
+service itself (3 endpoints, below) and the three `.env` values.
+
+> **Status:** ✅ `HTTPAIProvider` implemented — timeout, bearer auth, single retry,
+> response normalization (missing arrays → `[]`, confidence clamped 0–100), error
+> mapping, `GET /api/ai/status` health probe, and async polling via
+> `GET /api/inspections/[id]/results` are all live. While `AI_PROVIDER=mock`,
+> the deterministic demo model answers; nothing you build can break the UI
+> because every response is validated against the contract below before rendering.
 
 **Architecture:**
 ```
-Frontend → Backend API (/api/inspections/[id]/analyze) → AI Adapter (aiRegistry) → Provider (Mock or Real)
+Frontend → API (/api/inspections/[id]/analyze) → aiRegistry → HTTPAIProvider → your model service
+                                                       ↘ MockAIProvider (fallback in demo mode)
 ```
 
 NOT: Frontend → directly calls model.
@@ -237,91 +248,76 @@ These are stored in inspection `aiRunId` and report `aiModelVersion` for traceab
 
 ---
 
-## Timeout & Retry
+## Timeout & Retry (implemented)
 
-- **Timeout:** 30s for demo, 60s for production (configurable via env `AI_TIMEOUT_MS`)
-- **Retry:** Adapter retries once on failure, then falls back to mock in demo mode, throws in production
-- **Long processing:** If model needs >60s, implement async webhook: return `PROCESSING` with `runId`, then frontend polls `GET /api/inspections/[id]/results` (you need to implement polling endpoint)
+- **Timeout:** every request aborts after `AI_TIMEOUT_MS` (default 60000)
+- **Retry:** the registry retries a failing provider once, then in demo mode
+  (`NEXT_PUBLIC_DEMO_MODE=true`) falls back to the mock so the flow never dead-ends;
+  in production it surfaces a clean error and resets the inspection to draft
+- **Long processing (already supported end-to-end):** if your model needs longer than
+  the timeout, return `{ processingStatus: "PROCESSING", runId: "…" }` from `/analyze`.
+  The analyze route stores the run and the UI polls `GET /api/inspections/[id]/results`
+  (implemented) every 2s until `ready: true`, then refetches the inspection.
 
 ---
 
-## How to Integrate Real Model
+## How to Integrate Your Real Model
 
-### Option 1: Implement Provider Class
+### 1. Implement the service contract on your side
 
-Create `src/lib/ai/real-provider.ts`:
+Expose on your HTTP service (auth header `Authorization: Bearer <AI_SERVICE_KEY>` is
+sent automatically):
 
-```typescript
-import { AIModelProvider, AIAnalyzeRequest, AIAnalyzeResponse } from './types';
+| Endpoint | Purpose | Response |
+|---|---|---|
+| `GET  /health` | liveness for Settings → *Test connection* | `200` when ready |
+| `POST /analyze` | full pipeline for one inspection | `AIAnalyzeResponse` below (or a subset — it is normalized) |
+| `POST /extract-text` | single-image OCR (optional helper) | `{ text, confidence, boundingBoxes }` |
 
-export class RealAIProvider implements AIModelProvider {
-  name = 'LegalMetrology Vision';
-  version = 'v2.1.0';
+`/analyze` receives the `AIAnalyzeRequest` JSON below. Return as many contract fields
+as you can; anything missing gets a safe default. If you return partial data, the
+platform's own rule engine still re-validates extracted fields against the published
+rules (defense in depth — model output alone never becomes a finding in demo fallback
+paths).
 
-  async healthCheck() {
-    const res = await fetch(`${process.env.AI_SERVICE_URL}/health`, {
-      headers: { 'Authorization': `Bearer ${process.env.AI_SERVICE_KEY}` }
-    });
-    return res.ok;
-  }
-
-  async analyze(request: AIAnalyzeRequest): Promise<AIAnalyzeResponse> {
-    const res = await fetch(`${process.env.AI_SERVICE_URL}/analyze`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.AI_SERVICE_KEY}`
-      },
-      body: JSON.stringify(request),
-    });
-    if (!res.ok) throw new Error(`AI service failed: ${res.status}`);
-    const data = await res.json();
-    // Map real model response to AIAnalyzeResponse contract
-    return this.mapResponse(data, request);
-  }
-
-  private mapResponse(data: any, request: AIAnalyzeRequest): AIAnalyzeResponse {
-    // Map your model's output to contract
-    // Ensure bounding boxes, confidence, extractedFields, findings match spec
-  }
-
-  async extractText(imageUrl: string) { ... }
-}
-```
-
-### Option 2: Register Provider
-
-In `src/lib/ai/provider.ts`:
-
-```typescript
-import { RealAIProvider } from './real-provider';
-...
-this.register('real', new RealAIProvider());
-this.defaultProvider = process.env.AI_PROVIDER || 'mock';
-```
-
-### Option 3: Env Config
-
-Set in `.env`:
+### 2. Configure (no code)
 
 ```
 AI_PROVIDER=real
 AI_SERVICE_URL=https://your-model-endpoint.com
-AI_SERVICE_KEY=your-key
+AI_SERVICE_KEY=***
 AI_MODEL_VERSION=lm-vision-v2.1.0
+AI_TIMEOUT_MS=60000
 ```
 
-No frontend changes needed.
+### 3. (Optional) a different protocol? Implement the interface
 
----
+```typescript
+// src/lib/ai/my-provider.ts
+import { aiRegistry } from './provider';
+import type { AIModelProvider } from './types';
+
+export class MyProvider implements AIModelProvider {
+  name = 'My Model'; version = 'v1';
+  async analyze(req): Promise<AIAnalyzeResponse> { /* call service, map response */ }
+  async extractText(imageUrl: string) { /* ... */ }
+  async healthCheck() { return true; }
+}
+// register it:
+aiRegistry.register('my-model', new MyProvider());   // then AI_PROVIDER=my-model
+```
+
+Use `HTTPAIProvider.normalize()` as a reference for mapping a loose response onto the
+contract without crashing the UI.
 
 ## Testing Integration
 
-1. Set `AI_PROVIDER=real` and real URL/key
-2. Create inspection via UI
-3. Check logs: `aiRegistry.analyze` should call real provider
-4. Verify response matches contract — UI should render findings, evidence, confidence automatically
-5. If fails, check fallback to mock in demo mode, or error in production
+1. Set `AI_PROVIDER=real`, URL and key in `.env`; restart the dev server
+2. Open **Settings → AI model connection** → *Test connection* should report your service latency
+3. Create an inspection via the UI — the results card shows *Model* = your `modelName`/`modelVersion` (proof the real provider ran)
+4. Findings, evidence boxes and confidence render straight from your response — no UI work needed
+5. If your service is down: demo mode falls back to mock once (banner in audit log), production shows a clean error
+6. `npm test` keeps the contract green (it asserts on the mock as the reference implementation)
 
 ---
 

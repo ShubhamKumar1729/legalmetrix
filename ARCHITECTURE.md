@@ -1,4 +1,4 @@
-# Architecture — PackComply SIH 26034
+# Architecture — LegalMetrix SIH 26034
 
 ## Overview
 
@@ -9,7 +9,9 @@ PackComply is a modular, production-grade GovTech platform built with Next.js 14
 ### 1. Presentation Layer (UI)
 
 - **Landing** (`/`) — Marketing, problem/solution, demo creds
-- **Authenticated Shell** (`/app`) — Sidebar, TopNav, RBAC guard
+- **Authenticated Shell** (`/app`) — workflow-numbered sidebar (live review count), TopNav with real search (`/api/search`), friendly page titles
+- **Start Here** (`/app/guide`) — plain-language onboarding + glossary; `src/lib/ui/labels.ts` is the single source for friendly status/finding/severity wording
+- **Server-side guard on every API route** — `guardRequest(req, permission)` (JWT via httpOnly cookie or Bearer) enforces RBAC for real, not just UI visibility
   - Dashboard — KPIs, Recharts, recent inspections
   - Scan — 4-step wizard, image uploader, quality check
   - Scan/[id] — Results with evidence viewer, bounding boxes, findings table, extracted fields
@@ -62,7 +64,8 @@ All routes validate input (Zod) and enforce RBAC server-side.
 
 - `AIModelProvider` interface: `analyze(request): Promise<AIAnalyzeResponse>`
 - `MockAIProvider` — deterministic, realistic stages, bounding boxes, confidence
-- `AIProviderRegistry` — factory, fallback to mock in demo mode
+- `HTTPAIProvider` (`http-provider.ts`) — REAL model adapter: bearer auth, `AI_TIMEOUT_MS` abort, response normalization, `/health` + `/extract-text`; registered as `real`
+- `AIProviderRegistry` — factory; single retry on failure, fallback to mock in demo mode only; `getStatus()` feeds `/api/ai/status` and the Settings page
 - Future: implement interface, register, set AI_PROVIDER env
 
 #### Rule Engine
@@ -82,7 +85,7 @@ All routes validate input (Zod) and enforce RBAC server-side.
 #### Storage Adapter
 
 - `StorageProvider` interface: upload, delete, getUrl, exists
-- `LocalStorageProvider` — writes to ./uploads, returns mock URLs for demo reliability
+- `LocalStorageProvider` — writes to ./uploads, returns mock URLs for demo reliability; `POST /api/uploads` + `GET /api/uploads/{file}` give the scan wizard a real upload/serve loop
 - Ready for S3: implement interface, set STORAGE_TYPE=s3
 
 #### E-commerce Provider
