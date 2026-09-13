@@ -84,6 +84,29 @@ step('SameSite=None forces Secure, which browsers require', () => {
   });
 });
 
+step('partitions the cookie in SameSite=None mode so it survives a cross-site iframe', () => {
+  // Without Partitioned the cookie is a plain third-party cookie and is dropped by
+  // default in an iframe: login sets it, the next request arrives without it, and the
+  // user is bounced straight back to /login.
+  process.env.SESSION_COOKIE_SAME_SITE = 'none';
+  withNodeEnv('development', () => {    const attrs = sessionCookieAttributes(request({ proto: 'http' }));
+    assert.equal(attrs.partitioned, true, 'CHIPS is what lets a cross-site iframe keep the session');
+  });
+});
+
+step('does not partition a normal same-site deployment', () => {
+  // Partitioned cookies are only honoured with SameSite=None and Secure, so applying it
+  // to a lax deployment would add an attribute browsers ignore at best.
+  for (const mode of ['lax', 'strict', 'nonsense']) {
+    process.env.SESSION_COOKIE_SAME_SITE = mode;
+    const attrs = sessionCookieAttributes(request({ proto: 'https' }));
+    assert.equal(attrs.partitioned, false, `SameSite=${mode} must not be partitioned`);
+  }
+  delete process.env.SESSION_COOKIE_SAME_SITE;
+  const attrs = sessionCookieAttributes(request({ proto: 'https' }));
+  assert.equal(attrs.partitioned, false, 'the unset default (lax) must not be partitioned');
+});
+
 step('accepts an explicit strict setting', () => {
   process.env.SESSION_COOKIE_SAME_SITE = 'STRICT';
   const attrs = sessionCookieAttributes(request({ proto: 'https' }));

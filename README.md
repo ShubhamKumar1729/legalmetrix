@@ -283,7 +283,19 @@ in development, and a `Secure` flag keyed off `NODE_ENV` would be missing exactl
 domain, a `lax` cookie is not sent back** — the sign-in succeeds, the browser drops the
 cookie, and the next request bounces you to `/login` with no error shown. Set
 `SESSION_COOKIE_SAME_SITE=none` in that case; it forces `Secure`, so the site must be
-served over HTTPS. `tests/session-cookie.test.ts` covers both branches.
+served over HTTPS.
+
+`SameSite=None; Secure` on its own is still not sufficient inside an iframe. To the
+browser that is a *third-party* cookie, and third-party cookies are blocked by default
+(Safari ITP, Firefox ETP, Chrome's third-party cookie deprecation) regardless of the
+`Secure` flag. The cookie is stored, silently omitted from the next request, and sign-in
+looks broken with no error anywhere. `SESSION_COOKIE_SAME_SITE=none` therefore also sets
+the `Partitioned` (CHIPS) attribute, which keys the cookie to the embedding top-level
+site — not shared across sites, so browsers allow it. A normal same-site deployment gets
+`lax` and no `Partitioned`, since browsers only honour it alongside `SameSite=None`.
+
+`tests/session-cookie.test.ts` covers both branches.
+
 
 ---
 
