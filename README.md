@@ -321,7 +321,7 @@ route, the context object and the panel do not change.
 
 ## 12. Tests
 
-Fourteen suites run offline — no real camera, no real vision model, no database.
+Fifteen suites run offline — no real camera, no real vision model, no database.
 Two need a build: `test:api` runs against a server you start from an empty database,
 and `test:realmodel` boots its own server and a stub vision model to prove the
 `AI_PROVIDER=http` path end to end.
@@ -333,7 +333,8 @@ and `test:realmodel` boots its own server and a stub vision model to prove the
 | `npm run test:imagemanager` | The real `ImageManager` component in a DOM                              | Multiple images on one inspection, camera/upload parity, reorder, remove, cap, rejections |
 | `npm run test:ui`   | The real page components against an empty API                                   | Zero KPIs, empty states, navigation, no demo UI |
 | `npm run test:wizard` | The five-step inspection wizard, capturing through the real camera component | Validation, step progression, review routing, failure recovery |
-| `npm run test:cookie`   | Session cookie attributes                                                  | SameSite/Secure across proxy and iframe cases |
+| `npm run test:cookie`   | Session cookie attributes                                                  | SameSite/Secure/Partitioned across proxy and iframe cases |
+| `npm run test:login`    | The sign-in page in a DOM                                                   | Confirms the session landed; names a blocked cookie instead of bouncing |
 | `npm run test:aimodel` | The real vision-model path against a stub model server                     | Endpoint, bearer auth, response parsing, error surfacing, confidence merge |
 | `npm run test:assistant` | The assistant's answering logic                                            | Answers only from stored records; refuses what it cannot know |
 | `npm run test:assistant:panel` | The assistant UI panel                                               | Sends real questions, shows refusals, keeps the thread |
@@ -346,7 +347,7 @@ and `test:realmodel` boots its own server and a stub vision model to prove the
 | `npm run test:realmodel` | A real inspection through `AI_PROVIDER=http`                              | Boots its own server and stub vision model; asserts what gets stored |
 
 ```bash
-npm run test:all          # the 14 offline suites; excludes test:api and test:realmodel
+npm run test:all          # the 15 offline suites; excludes test:api and test:realmodel
 ```
 
 `next dev` and `next start` cannot share a build directory — they overwrite each
@@ -428,6 +429,7 @@ tests/
   imagemanager.component.test.tsx  Multiple images + camera/upload parity (npm run test:imagemanager)
   ui.empty.test.tsx             Pages + navigation on an empty API (npm run test:ui)
   session-cookie.test.ts        Session cookie flags (npm run test:cookie)
+  login.page.test.tsx           Sign-in confirms the session (npm run test:login)
   ai-http-provider.test.ts      Real model path (npm run test:aimodel)
   assistant.test.ts             Assistant answering logic (npm run test:assistant)
   assistant.panel.test.tsx      Assistant panel UI (npm run test:assistant:panel)

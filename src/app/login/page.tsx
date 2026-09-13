@@ -43,6 +43,18 @@ export default function LoginPage() {
       });
       const body = await res.json();
       if (body.success) {
+        // A 200 here means the credentials were right and a session cookie was sent back.
+        // It does not mean the browser kept it: inside a cross-site iframe the cookie can
+        // be blocked outright, and navigating anyway bounces straight back to this page
+        // with no error anywhere — which is indistinguishable from a rejected password.
+        // Confirming the session landed turns that into a message naming the real cause.
+        const confirmed = await fetch('/api/auth/me', { cache: 'no-store' });
+        if (confirmed.status === 401) {
+          setError(
+            'Sign-in succeeded, but your browser blocked the session cookie. This happens when third-party cookies are disabled for an embedded preview — open this app in its own browser tab instead.'
+          );
+          return;
+        }
         window.location.href = '/app/dashboard';
         return;
       }

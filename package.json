@@ -12,7 +12,7 @@
     "test:camera": "tsx --tsconfig tests/tsconfig.json tests/camera.component.test.tsx",
     "test:api": "node tests/e2e.mjs",
     "test:ui": "tsx --tsconfig tests/tsconfig.json tests/ui.empty.test.tsx",
-    "test:all": "npm run test && npm run test:cookie && npm run test:aimodel && npm run test:assistant && npm run test:assistant:panel && npm run test:assistant:page && npm run test:inspection && npm run test:users && npm run test:mobile && npm run test:camera && npm run test:imagemanager && npm run test:ui && npm run test:wizard && npm run test:report",
+    "test:all": "npm run test && npm run test:cookie && npm run test:aimodel && npm run test:assistant && npm run test:assistant:panel && npm run test:assistant:page && npm run test:inspection && npm run test:users && npm run test:mobile && npm run test:camera && npm run test:imagemanager && npm run test:login && npm run test:ui && npm run test:wizard && npm run test:report",
     "test:report": "tsx --tsconfig tests/tsconfig.json tests/report.test.tsx",
     "test:wizard": "tsx --tsconfig tests/tsconfig.json tests/wizard.test.tsx",
     "test:assistant": "tsx tests/assistant.test.ts",
@@ -24,7 +24,8 @@
     "test:cookie": "tsx tests/session-cookie.test.ts",
     "test:aimodel": "tsx tests/ai-http-provider.test.ts",
     "test:realmodel": "node tests/e2e-real-model.mjs",
-    "test:imagemanager": "tsx --tsconfig tests/tsconfig.json tests/imagemanager.component.test.tsx"
+    "test:imagemanager": "tsx --tsconfig tests/tsconfig.json tests/imagemanager.component.test.tsx",
+    "test:login": "tsx --tsconfig tests/tsconfig.json tests/login.page.test.tsx"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.6.0",
