@@ -1,39 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
+import { requirePermission, isResponse } from '@/lib/auth/session';
+import { db } from '@/lib/db/repository';
+import { calculateRiskScore } from '@/lib/rules/scoring';
 
+/**
+ * Products are created automatically when an inspection is submitted.
+ * This list is therefore always a reflection of real inspection activity.
+ */
 export async function GET(req: NextRequest) {
-  await seedMemoryDB();
+  const user = requirePermission('product:read');
+  if (isResponse(user)) return user;
+
   const { searchParams } = new URL(req.url);
-  const search = searchParams.get('search');
+  const q = (searchParams.get('q') || '').toLowerCase().trim();
   const category = searchParams.get('category');
 
-  let products = memoryDB.products.all();
+  const [products, inspections] = await Promise.all([
+    db.products.list({}, { sortDescBy: 'updatedAt' }),
+    db.inspections.list({}, { sortDescBy: 'createdAt' }),
+  ]);
 
-  if (search) {
-    const s = search.toLowerCase();
-    products = products.filter((p: any) => 
-      p.name.toLowerCase().includes(s) ||
-      p.brand.toLowerCase().includes(s) ||
-      p.manufacturer.toLowerCase().includes(s)
+  const enriched = products.map((product) => {
+    const history = inspections.filter(
+      (i) => i.productId === product.id || i.productName === product.name
     );
-  }
-
-  if (category) {
-    products = products.filter((p: any) => p.category === category);
-  }
-
-  // Enrich with inspection counts
-  const inspections = memoryDB.inspections.all();
-  const enriched = products.map((p: any) => {
-    const productInspections = inspections.filter((i: any) => i.productId === p.id || i.productName === p.name);
-    const violations = productInspections.filter((i: any) => i.status === 'NON_COMPLIANT').length;
+    const analyzed = history.filter((i) => i.status !== 'DRAFT' && i.status !== 'PROCESSING');
     return {
-      ...p,
-      inspections: productInspections.length,
-      violations,
-      lastInspection: productInspections[0]?.createdAt || p.lastInspection,
+      ...product,
+      inspectionCount: history.length,
+      violationCount: analyzed.filter((i) => i.status === 'NON_COMPLIANT').length,
+      latestScore: analyzed[0]?.scored ? analyzed[0].complianceScore : null,
+      riskScore: calculateRiskScore(analyzed),
+      lastInspection: history[0]?.createdAt || product.updatedAt,
     };
   });
 
-  return NextResponse.json({ success: true, data: enriched });
+  const filtered = enriched.filter((product) => {
+    const matchesQuery =
+      !q || `${product.name} ${product.brand} ${product.manufacturer} ${product.barcode}`.toLowerCase().includes(q);
+    const matchesCategory = !category || category === 'ALL' || product.category === category;
+    return matchesQuery && matchesCategory;
+  });
+
+  return NextResponse.json({ success: true, data: { products: filtered, total: filtered.length } });
 }

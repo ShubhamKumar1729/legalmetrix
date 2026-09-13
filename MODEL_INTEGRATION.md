@@ -1,353 +1,163 @@
-# AI Model Integration Contract — PackComply
+# AI Model Integration
 
-## Overview
+Connecting the real vision model requires **no changes** to the camera, upload,
+storage, inspection, review or reporting code. Implement one HTTP endpoint and set
+three environment variables.
 
-The platform is designed so the real AI/ML model team can integrate without rebuilding frontend. The contract is via `AIModelProvider` interface and `/api/ai/analyze` abstraction (implemented as `/api/inspections/[id]/analyze` calling the provider).
+## Why the current setup extracts nothing
 
-**Architecture:**
-```
-Frontend → Backend API (/api/inspections/[id]/analyze) → AI Adapter (aiRegistry) → Provider (Mock or Real)
-```
+`AI_PROVIDER` defaults to `development`, which selects `MockAIProvider`. It accepts
+the real request and returns the real response shape, but it reads nothing from the
+package: it returns zero `extractedFields`, zero `findings`, and explains itself in
+`warnings`.
 
-NOT: Frontend → directly calls model.
+The rule engine then sees no extracted data, so every configured rule becomes a
+finding with confidence `0` and status `REVIEW` — routed to a human. No values are
+invented at any point, and the whole pipeline (inspection → analysis → review →
+report) can be exercised before a model exists.
 
----
+## The contract
 
-## Provider Interface
+`POST $AI_SERVICE_URL`, with `Authorization: Bearer $AI_SERVICE_KEY` when set.
 
-**Location:** `src/lib/ai/types.ts`
+### Request — `AIAnalyzeRequest`
 
-```typescript
-export interface AIModelProvider {
-  name: string;
-  version: string;
-  analyze(request: AIAnalyzeRequest): Promise<AIAnalyzeResponse>;
-  extractText(imageUrl: string): Promise<{ text: string; confidence: number; boundingBoxes: any[] }>;
-  healthCheck(): Promise<boolean>;
+```jsonc
+{
+  "inspectionId": "…",
+  "imageIds":   ["…", "…"],          // stable evidence ids
+  "imageUrls":  ["/api/images/…"],   // same-origin; send the session cookie to fetch
+  "productMetadata": { "productName": "…", "brand": "…", "category": "FOOD", "barcode": "…" },
+  "ruleSetVersion": "LM-PC-2011",
+  "options": { "enableMultilingual": true, "enableFontAnalysis": true, "enableTamperingDetection": true }
 }
 ```
 
----
+`imageUrls` are served by `GET /api/images/:id`, which requires a signed-in session.
+Either forward the cookie, or fetch the bytes server-side from `STORAGE_PATH` using
+the image id.
 
-## Request Contract
+### Response — `AIAnalyzeResponse`
 
-**Type:** `AIAnalyzeRequest`
-
-```typescript
+```jsonc
 {
-  inspectionId: string;          // UUID of inspection
-  imageIds: string[];            // Internal image IDs
-  imageUrls: string[];           // URLs to fetch images (local or S3 presigned)
-  productMetadata?: {
-    productName?: string;
-    brand?: string;
-    category?: string;           // FOOD, COSMETICS, etc.
-    barcode?: string;
-  };
-  ruleSetVersion: string;        // e.g., "LM-PC-2011-v1.2"
-  options?: {
-    enableMultilingual?: boolean;
-    enableFontAnalysis?: boolean;
-    enableTamperingDetection?: boolean;
-  };
-}
-```
-
-**Image Format:**
-- Input: JPEG, PNG, WebP, max 10 images, max 10MB each (validated)
-- URLs: local `/uploads/...` or S3 presigned (provider should handle both)
-- Quality metadata available in inspection record if needed
-
----
-
-## Response Contract
-
-**Type:** `AIAnalyzeResponse`
-
-```typescript
-{
-  inspectionId: string;
-  runId: string;                 // Unique AI run ID
-  processingStatus: 'PROCESSING' | 'COMPLETED' | 'FAILED';
-  stages: AIProcessingStage[];   // 12 stages with status/progress
-  extractedFields: ExtractedField[];
-  findings: Finding[];
-  confidence: {
-    average: number;             // 0-100
-    min: number;
-    max: number;
-  };
-  evidenceRegions: {
-    imageId: string;
-    boundingBox: BoundingBox;    // { x, y, width, height, page? }
-    label: string;               // e.g., "mrp", "net_quantity"
-    confidence: number;
-  }[];
-  warnings: string[];
-  modelMetadata: {
-    provider: string;            // "mock" | "real"
-    modelName: string;           // e.g., "LegalMetrology Vision v2.1"
-    modelVersion: string;        // e.g., "lm-vision-v2.1.0"
-    processedAt: string;         // ISO timestamp
-    processingTimeMs: number;
-  };
-}
-```
-
-### ExtractedField
-
-```typescript
-{
-  id: string;                    // Unique
-  fieldName: string;             // "mrp" | "net_quantity" | "manufacturer_address" | "product_name" | "customer_care" | "manufacture_date" | etc.
-  value: string;                 // Display value, e.g., "₹99"
-  normalizedValue?: string;      // Normalized, e.g., "99.00" or "500"
-  rawText: string;               // OCR raw, e.g., "MRP Rs. 99/-"
-  language: string;              // "en" | "hi" | "pa" | etc.
-  script: string;                // "Latin" | "Devanagari" | "Gurmukhi"
-  confidence: number;            // 0-100
-  sourceImageId: string;         // Which image
-  boundingBox: BoundingBox;      // Location in image
-  status: 'PASS' | 'VIOLATION' | 'WARNING' | 'REVIEW';
-  editable: boolean;             // Can reviewer edit?
-  reviewStatus: 'PENDING' | 'AI_CONFIRMED' | etc.
-  ruleCode?: string;             // Associated rule
-}
-```
-
-### Finding
-
-```typescript
-{
-  id: string;
-  inspectionId: string;
-  declarationType: string;       // "MRP" | "NET_QUANTITY" | "MANUFACTURER" etc.
-  title: string;                 // Human readable
-  description: string;
-  detectedValue?: string;
-  expectedValue?: string;
-  status: 'PASS' | 'VIOLATION' | 'WARNING' | 'REVIEW';
-  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'WARNING';
-  confidence: number;
-  ruleId: string;
-  ruleCode: string;              // e.g., "LM-PC-2011-6(1)(e)"
-  legalReference: string;        // e.g., "Rule 6(1)(e)"
-  evidence: {
-    imageId: string;
-    boundingBox: BoundingBox;
-    croppedUrl?: string;         // Optional cropped evidence
-  }[];
-  reviewStatus: ReviewStatus;
-  createdAt: string;
-}
-```
-
-### BoundingBox Format
-
-```typescript
-{
-  x: number;                     // Left, in pixels relative to image (0-400 for demo, but real should be 0-imageWidth)
-  y: number;                     // Top
-  width: number;
-  height: number;
-  page?: number;                 // For multi-page docs
-}
-```
-
-**Important:** Frontend expects x/y/width/height as numbers. For demo we use 0-400 coordinate space, but real model should return actual pixel coordinates. Evidence viewer will scale proportionally.
-
-### Processing Stages
-
-Expected 12 stages (can be fewer/more, UI handles dynamic):
-
-1. Image Quality Analysis
-2. OCR
-3. Text Region Detection
-4. Declaration Detection
-5. Entity Extraction
-6. Multilingual Matching
-7. MRP Analysis
-8. Net Quantity Analysis
-9. Font/Readability Analysis
-10. Rule Validation
-11. Confidence Scoring
-12. Final Decision
-
-Each stage:
-```typescript
-{
-  id: string;
-  name: string;
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'WARNING' | 'FAILED';
-  progress: number;              // 0-100
-  startedAt?: string;
-  completedAt?: string;
-  message?: string;
-  details?: any;                 // Stage-specific, e.g., { languagesDetected: ['en','hi'] }
-}
-```
-
----
-
-## Error Format
-
-Provider should throw with message, adapter catches and falls back to mock in demo mode. For production, return:
-
-```typescript
-{
-  inspectionId,
-  runId,
-  processingStatus: 'FAILED',
-  stages: [... with FAILED status ...],
-  extractedFields: [],
-  findings: [],
-  confidence: { average: 0, min: 0, max: 0 },
-  evidenceRegions: [],
-  warnings: [],
-  modelMetadata: { ... },
-  error: {
-    code: 'OCR_FAILED' | 'MODEL_TIMEOUT' | 'INVALID_IMAGE' | etc.
-    message: string;
-    details?: any;
+  "inspectionId": "…",
+  "runId": "…",
+  "processingStatus": "COMPLETED",
+  "stages": [ { "id": "ocr", "name": "Text Extraction", "status": "COMPLETED", "progress": 100 } ],
+  "extractedFields": [
+    {
+      "id": "ef-1",
+      "fieldName": "mrp",              // must match the rule's validationLogic.field
+      "value": "₹99",
+      "normalizedValue": "99",
+      "rawText": "MRP ₹99/- (Incl. of all taxes)",
+      "language": "en",
+      "script": "Latin",
+      "confidence": 97,                // 0–100
+      "sourceImageId": "…",            // one of the request's imageIds
+      "boundingBox": { "x": 120, "y": 300, "width": 180, "height": 42 },
+      "status": "PASS",                // PASS | VIOLATION | WARNING | REVIEW
+      "editable": true,
+      "reviewStatus": "AI_CONFIRMED",
+      "ruleCode": "LM-PC-2011-6(1)(e)" // optional, improves matching
+    }
+  ],
+  "findings": [ /* optional — see "How findings are combined" */ ],
+  "confidence": { "average": 93, "min": 81, "max": 99 },
+  "evidenceRegions": [ { "imageId": "…", "boundingBox": { … }, "label": "mrp", "confidence": 97 } ],
+  "warnings": [],
+  "modelMetadata": {
+    "provider": "http", "modelName": "…", "modelVersion": "…",
+    "processedAt": "…", "processingTimeMs": 4210
   }
 }
 ```
 
----
+### Field names the rule set expects
 
-## Model Versioning
+Use these `fieldName` values so extracted data matches published rules:
 
-Every response must include:
+`product_name`, `brand`, `manufacturer_address`, `net_quantity`, `mrp`,
+`customer_care`, `manufacture_date`, `best_before_date`, `country_of_origin`,
+`batch_number`, `importer`.
 
-- `modelName` — e.g., "LegalMetrology Vision"
-- `modelVersion` — semver, e.g., "v2.1.0"
-- `provider` — "real" or custom name
-- `processedAt` — ISO timestamp
+Provide `normalizedValue` in a machine-comparable form (plain number for quantities
+and prices) — the engine derives `<field>_value` from it for `gt`/`gte`/`lt`/`lte`.
 
-These are stored in inspection `aiRunId` and report `aiModelVersion` for traceability.
+### Bounding boxes
 
----
+Report coordinates in **pixels of the source image**. They are shown in *Technical
+details* and on the report, and they let a reviewer confirm what the model read.
 
-## Authentication
+## How findings are combined
 
-- **Mock:** No auth
-- **Real:** Set `AI_SERVICE_URL` and `AI_SERVICE_KEY` in env
-- Provider should read from `process.env.AI_SERVICE_URL` and `AI_SERVICE_KEY`
-- Use Bearer token or API key in header — implement in custom provider
+The rule engine owns the compliance decision for every configured rule.
+`mergeFindings()` then folds the model's output over it:
 
----
+- a model finding matching a rule (by `ruleCode`) supplies the detected value,
+  evidence and confidence;
+- if the model's confidence is at or above `CONFIDENCE_THRESHOLD_MEDIUM`, its status
+  is trusted, otherwise the rule engine's decision stands;
+- model findings that match no rule are appended, so nothing the model reports is
+  lost.
 
-## Timeout & Retry
+The final score and status are recomputed from the merged findings, so what is stored
+always matches what is displayed.
 
-- **Timeout:** 30s for demo, 60s for production (configurable via env `AI_TIMEOUT_MS`)
-- **Retry:** Adapter retries once on failure, then falls back to mock in demo mode, throws in production
-- **Long processing:** If model needs >60s, implement async webhook: return `PROCESSING` with `runId`, then frontend polls `GET /api/inspections/[id]/results` (you need to implement polling endpoint)
+## Enabling the model
 
----
+```bash
+AI_PROVIDER=http
+AI_SERVICE_URL=https://your-model-host/analyze
+AI_SERVICE_KEY=…
+AI_MODEL_VERSION=your-model-1.0.0
+```
 
-## How to Integrate Real Model
+Restart the application. **Admin** shows *Vision model connected* instead of *No
+vision model connected*, and new inspections record the provider, model version and
+processing time on the inspection itself.
 
-### Option 1: Implement Provider Class
+### Sibling routes
 
-Create `src/lib/ai/real-provider.ts`:
+`AI_SERVICE_URL` points at the analyze route. The other two calls are resolved from
+the same base, so the model host exposes them alongside it:
 
-```typescript
-import { AIModelProvider, AIAnalyzeRequest, AIAnalyzeResponse } from './types';
+| Call            | Route derived from `https://your-model-host/analyze` | Method | Body                |
+| --------------- | --------------------------------------------------- | ------ | ------------------- |
+| `analyze()`     | `https://your-model-host/analyze`                   | POST   | `AIAnalyzeRequest`  |
+| `extractText()` | `https://your-model-host/extract-text`              | POST   | `{ imageUrl }`      |
+| `healthCheck()` | `https://your-model-host/health`                    | GET    | —                   |
 
-export class RealAIProvider implements AIModelProvider {
-  name = 'LegalMetrology Vision';
-  version = 'v2.1.0';
+A trailing `/analyze` is stripped before the sibling is appended, so the routes sit
+next to analyze rather than underneath it. All three carry
+`Authorization: Bearer $AI_SERVICE_KEY` when the key is set. `extractText()` and
+`healthCheck()` are part of the `AIModelProvider` interface and are covered by
+`npm run test:aimodel`, but the inspection flow itself only calls `analyze()`.
 
-  async healthCheck() {
-    const res = await fetch(`${process.env.AI_SERVICE_URL}/health`, {
-      headers: { 'Authorization': `Bearer ${process.env.AI_SERVICE_KEY}` }
-    });
-    return res.ok;
-  }
+## Writing an in-process provider instead
 
-  async analyze(request: AIAnalyzeRequest): Promise<AIAnalyzeResponse> {
-    const res = await fetch(`${process.env.AI_SERVICE_URL}/analyze`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.AI_SERVICE_KEY}`
-      },
-      body: JSON.stringify(request),
-    });
-    if (!res.ok) throw new Error(`AI service failed: ${res.status}`);
-    const data = await res.json();
-    // Map real model response to AIAnalyzeResponse contract
-    return this.mapResponse(data, request);
-  }
+Implement `AIModelProvider` and register it:
 
-  private mapResponse(data: any, request: AIAnalyzeRequest): AIAnalyzeResponse {
-    // Map your model's output to contract
-    // Ensure bounding boxes, confidence, extractedFields, findings match spec
-  }
+```ts
+import { aiRegistry } from '@/lib/ai/provider';
 
-  async extractText(imageUrl: string) { ... }
+class MyProvider implements AIModelProvider {
+  name = 'My model';
+  version = '1.0.0';
+  async analyze(request: AIAnalyzeRequest): Promise<AIAnalyzeResponse> { /* … */ }
+  async extractText(imageUrl: string) { /* … */ }
+  async healthCheck() { return true; }
 }
+
+aiRegistry.register('myprovider', new MyProvider());   // then AI_PROVIDER=myprovider
 ```
 
-### Option 2: Register Provider
+Leave `isDevelopmentProvider` unset (or `false`) so the UI stops showing the
+"no vision model connected" notice.
 
-In `src/lib/ai/provider.ts`:
+## Errors
 
-```typescript
-import { RealAIProvider } from './real-provider';
-...
-this.register('real', new RealAIProvider());
-this.defaultProvider = process.env.AI_PROVIDER || 'mock';
-```
-
-### Option 3: Env Config
-
-Set in `.env`:
-
-```
-AI_PROVIDER=real
-AI_SERVICE_URL=https://your-model-endpoint.com
-AI_SERVICE_KEY=your-key
-AI_MODEL_VERSION=lm-vision-v2.1.0
-```
-
-No frontend changes needed.
-
----
-
-## Testing Integration
-
-1. Set `AI_PROVIDER=real` and real URL/key
-2. Create inspection via UI
-3. Check logs: `aiRegistry.analyze` should call real provider
-4. Verify response matches contract — UI should render findings, evidence, confidence automatically
-5. If fails, check fallback to mock in demo mode, or error in production
-
----
-
-## Mock Provider for Reference
-
-See `src/lib/ai/mock-provider.ts` for:
-
-- Deterministic data based on product name (for reliable demo)
-- Realistic stages with timing
-- Bounding boxes
-- Multilingual examples
-- Warnings
-- Confidence scores
-
-Use as template for real provider mapping.
-
----
-
-## Future Extensibility
-
-- Additional models: register multiple providers, e.g., `ocr-provider`, `tampering-provider`, compose in adapter
-- Additional languages: add to `language` and `script` fields, UI already supports
-- Streaming: if model supports streaming stages, update stages incrementally via websocket or polling
-
----
-
-## Contact
-
-For integration questions, check `ARCHITECTURE.md` and `API.md`. The contract is intentionally simple to allow model team to focus on CV/NLP, not platform plumbing.
+If the provider throws, the analysis route resets the inspection to `DRAFT`, stores
+the failure message in `analysisNotes` and returns `500`. The inspection, its images
+and any earlier findings are preserved.

@@ -1,80 +1,73 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { v4 as uuidv4 } from 'uuid';
+import { requirePermission, isResponse, badRequest } from '@/lib/auth/session';
+import { db } from '@/lib/db/repository';
+import {
+  compareListing,
+  fetchListing,
+  isEcommerceConfigured,
+  ProviderNotConfiguredError,
+} from '@/lib/ecommerce/provider';
+import { logAudit } from '@/lib/audit/audit';
 
+/**
+ * Compares an online listing against a real inspection of the same product.
+ * Listing data comes only from a configured provider — never from hard-coded values.
+ */
 export async function POST(req: NextRequest) {
-  const { url, packageInspectionId } = await req.json();
+  const user = requirePermission('ecommerce:analyze');
+  if (isResponse(user)) return user;
 
-  if (!url) {
-    return NextResponse.json({ success: false, error: { message: 'URL required' } }, { status: 400 });
-  }
+  const { url, inspectionId } = await req.json().catch(() => ({}));
+  if (!url) return badRequest('A listing URL is required.');
+  if (!inspectionId) return badRequest('Select the inspection to compare the listing against.');
 
-  // Mock e-commerce analysis
-  const isAmazon = url.includes('amazon');
-  const platform = isAmazon ? 'Amazon' : url.includes('flipkart') ? 'Flipkart' : 'Generic';
+  const inspection = await db.inspections.get(String(inspectionId));
+  if (!inspection) return badRequest('The selected inspection could not be found.');
 
-  // Simulate listing extraction
-  await new Promise(r => setTimeout(r, 800));
+  try {
+    const listing = await fetchListing(String(url));
+    const comparison = compareListing(listing, inspection);
 
-  const listing = {
-    id: uuidv4(),
-    url,
-    platform,
-    productName: 'FreshBite Premium Biscuits - 500g Pack',
-    brand: 'FreshBite',
-    mrp: '₹99',
-    netQuantity: '500 g',
-    manufacturer: 'FreshBite Foods Pvt Ltd',
-    images: ['/api/placeholder/image?text=Listing+Image'],
-    extractedAt: new Date().toISOString(),
-  };
+    const record = await db.ecommerceListings.create({
+      url: listing.url,
+      platform: listing.platform,
+      productName: listing.fields.productName || inspection.productName,
+      brand: listing.fields.brand || inspection.brand,
+      mrp: listing.fields.mrp,
+      netQuantity: listing.fields.netQuantity,
+      manufacturer: listing.fields.manufacturer,
+      images: listing.fields.images || [],
+      extractedAt: listing.extractedAt,
+      complianceComparison: comparison,
+    });
 
-  // Mock package data for comparison (if inspection provided, use it, else mock mismatch)
-  const packageData = {
-    mrp: '₹89', // Mismatch example
-    netQuantity: '500 g',
-    productName: 'FreshBite Premium Biscuits',
-    manufacturer: 'FreshBite Foods Pvt Ltd, Ludhiana',
-  };
+    await logAudit({
+      userId: user.id,
+      userName: user.name,
+      role: user.role,
+      action: 'ECOMMERCE_LISTING_ANALYZED',
+      resource: 'ECOMMERCE_LISTING',
+      resourceId: record.id,
+      newValue: { url: listing.url, inspectionId: inspection.id },
+    });
 
-  const comparison = [
-    {
-      field: 'MRP',
-      listingValue: listing.mrp,
-      packageValue: packageData.mrp,
-      match: listing.mrp === packageData.mrp,
-      status: listing.mrp === packageData.mrp ? 'PASS' : 'VIOLATION',
-    },
-    {
-      field: 'Net Quantity',
-      listingValue: listing.netQuantity,
-      packageValue: packageData.netQuantity,
-      match: listing.netQuantity === packageData.netQuantity,
-      status: 'PASS',
-    },
-    {
-      field: 'Product Name',
-      listingValue: listing.productName,
-      packageValue: packageData.productName,
-      match: true,
-      status: 'PASS',
-    },
-    {
-      field: 'Manufacturer',
-      listingValue: listing.manufacturer,
-      packageValue: packageData.manufacturer,
-      match: false,
-      status: 'REVIEW',
-    },
-  ];
-
-  return NextResponse.json({
-    success: true,
-    data: {
-      listing,
-      packageData,
-      comparison,
-      overallStatus: comparison.some(c => c.status === 'VIOLATION') ? 'MISMATCH' : 'MATCH',
-      complianceScore: comparison.filter(c => c.match).length / comparison.length * 100,
+    return NextResponse.json({ success: true, data: { listing, comparison, listingId: record.id } });
+  } catch (error) {
+    if (error instanceof ProviderNotConfiguredError) {
+      return NextResponse.json(
+        { success: false, error: { code: 'PROVIDER_NOT_CONFIGURED', message: error.message } },
+        { status: 501 }
+      );
     }
-  });
+    return NextResponse.json(
+      { success: false, error: { code: 'ANALYSIS_FAILED', message: (error as Error).message } },
+      { status: 502 }
+    );
+  }
+}
+
+export async function GET() {
+  const user = requirePermission('ecommerce:analyze');
+  if (isResponse(user)) return user;
+  return NextResponse.json({ success: true, data: { configured: isEcommerceConfigured() } });
 }

@@ -1,5 +1,8 @@
 export type Role = 'SUPER_ADMIN' | 'REGULATORY_ADMIN' | 'ENFORCEMENT_OFFICER' | 'REVIEWER' | 'ANALYST' | 'AUDITOR';
 
+/** Roles surfaced to ordinary users. The full RBAC matrix stays in the backend. */
+export type SimpleRole = 'INSPECTOR' | 'REVIEWER' | 'ADMIN';
+
 export type InspectionStatus = 'DRAFT' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLIANT' | 'NON_COMPLIANT';
 export type ReviewStatus = 'PENDING' | 'AI_CONFIRMED' | 'HUMAN_CONFIRMED' | 'CORRECTED' | 'ESCALATED';
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'WARNING';
@@ -53,31 +56,43 @@ export interface Finding {
   reviewStatus: ReviewStatus;
   correctedValue?: string;
   reviewerId?: string;
+  reviewerName?: string;
   reviewerComment?: string;
+  reviewedAt?: string;
   createdAt: string;
 }
+
+export type ImageSide = 'FRONT' | 'BACK' | 'SIDE' | 'TOP' | 'BOTTOM' | 'ADDITIONAL';
 
 export interface ProductImage {
   id: string;
   inspectionId: string;
-  side: 'FRONT' | 'BACK' | 'SIDE' | 'TOP' | 'BOTTOM' | 'ADDITIONAL';
+  side: ImageSide;
   url: string;
   originalName: string;
   size: number;
   mimeType: string;
+  width?: number;
+  height?: number;
+  /** Where the image came from: a device camera or a file upload. */
+  source: 'CAMERA' | 'UPLOAD';
+  /**
+   * Measured from the actual pixels — never invented.
+   * `resolution` is read server-side from the file header; the optional metrics are
+   * measured in the browser from the real image before it is uploaded.
+   */
   quality: {
     resolution: number;
-    blurScore: number;
-    brightness: number;
-    readability: number;
-    coverage: number;
+    brightness?: number;
+    blurScore?: number;
+    readability?: number;
   };
   uploadedAt: string;
 }
 
 export interface Inspection {
   id: string;
-  inspectionId: string;
+  inspectionNumber: string;
   productId?: string;
   productName: string;
   brand: string;
@@ -99,8 +114,14 @@ export interface Inspection {
   startedAt: string;
   completedAt?: string;
   aiRunId?: string;
+  aiProvider?: string;
+  aiModelVersion?: string;
+  processingTimeMs?: number;
   ruleSetVersion: string;
+  rulesEvaluated: number;
   complianceScore: number;
+  /** False when the inspection could not be scored (for example: no rules configured). */
+  scored: boolean;
   confidenceSummary: {
     average: number;
     min: number;
@@ -109,15 +130,54 @@ export interface Inspection {
   };
   findings: Finding[];
   extractedFields: ExtractedField[];
+  /** Human-readable notes explaining the analysis outcome. */
+  analysisNotes: string[];
   reviewStatus: 'NOT_REQUIRED' | 'PENDING' | 'IN_REVIEW' | 'COMPLETED';
   reportId?: string;
   createdAt: string;
   updatedAt: string;
 }
 
+export interface Product {
+  id: string;
+  name: string;
+  brand: string;
+  manufacturer: string;
+  category: string;
+  barcode?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Report {
+  id: string;
+  reportNumber: string;
+  inspectionId: string;
+  inspectionNumber: string;
+  productName: string;
+  status: InspectionStatus;
+  complianceScore: number;
+  generatedBy: string;
+  generatedByName: string;
+  summary: string;
+  createdAt: string;
+}
+
 export interface RuleCondition {
   field?: string;
-  operator?: 'exists' | 'not_exists' | 'equals' | 'not_equals' | 'contains' | 'regex' | 'gt' | 'lt' | 'gte' | 'lte' | 'in' | 'not_in';
+  operator?:
+    | 'exists'
+    | 'not_exists'
+    | 'equals'
+    | 'not_equals'
+    | 'contains'
+    | 'regex'
+    | 'gt'
+    | 'lt'
+    | 'gte'
+    | 'lte'
+    | 'in'
+    | 'not_in';
   value?: any;
   logic?: 'AND' | 'OR' | 'NOT';
   conditions?: RuleCondition[];
@@ -202,5 +262,7 @@ export interface DashboardKPIs {
   complianceRate: number;
   avgConfidence: number;
   pendingReviews: number;
-  repeatOffenders: number;
+  products: number;
+  reports: number;
+  rulesPublished: number;
 }

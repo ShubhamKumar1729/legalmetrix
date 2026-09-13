@@ -49,7 +49,7 @@ export const defaultSystemConfig: SystemConfig = {
       'rule-validation',
       'confidence-scoring',
     ],
-    modelVersion: 'mock-vision-v0.1.0',
+    modelVersion: process.env.AI_MODEL_VERSION || 'not-configured',
   },
   compliance: {
     scoringWeights: {
@@ -68,7 +68,7 @@ export const defaultSystemConfig: SystemConfig = {
   inspection: {
     requiredEvidence: ['FRONT', 'BACK'],
     minImageQuality: {
-      resolution: 200,
+      resolution: 320,
       blurThreshold: 0.3,
       readabilityThreshold: 0.7,
     },
@@ -85,7 +85,10 @@ export const defaultSystemConfig: SystemConfig = {
   },
 };
 
-// In-memory config store for demo
+/**
+ * Runtime configuration. Values are held in memory for the life of the process; swap this
+ * for a persisted store when multi-instance deployments are needed.
+ */
 let currentConfig: SystemConfig = { ...defaultSystemConfig };
 
 export function getSystemConfig(): SystemConfig {

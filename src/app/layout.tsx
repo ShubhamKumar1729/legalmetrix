@@ -1,22 +1,16 @@
-import type { Metadata } from "next";
-import "./globals.css";
+import type { Metadata } from 'next';
+import './globals.css';
 
 export const metadata: Metadata = {
-  title: "PackComply - AI-Powered Packaged Commodity Compliance | SIH 26034",
-  description: "Government-grade AI platform for Legal Metrology enforcement under Packaged Commodities Rules, 2011",
-  keywords: ["Legal Metrology", "SIH", "Compliance", "Packaged Commodities", "GovTech"],
+  title: 'LegalMetrix — Packaged Commodity Compliance',
+  description:
+    'Inspection, rule validation and reporting platform for the Legal Metrology (Packaged Commodities) Rules, 2011.',
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className="min-h-screen bg-background antialiased">
-        {children}
-      </body>
+      <body className="min-h-screen bg-background antialiased">{children}</body>
     </html>
   );
 }

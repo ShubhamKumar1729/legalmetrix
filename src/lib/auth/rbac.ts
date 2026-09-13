@@ -1,4 +1,4 @@
-import type { Role } from '@/types';
+import type { Role, SimpleRole } from '@/types';
 
 export type Permission =
   | 'inspection:create'
@@ -8,14 +8,12 @@ export type Permission =
   | 'review:read'
   | 'review:write'
   | 'product:read'
-  | 'product:history'
   | 'rule:read'
   | 'rule:write'
   | 'rule:publish'
   | 'analytics:read'
   | 'report:read'
   | 'report:write'
-  | 'report:download'
   | 'user:read'
   | 'user:write'
   | 'audit:read'
@@ -23,81 +21,96 @@ export type Permission =
   | 'config:write'
   | 'ecommerce:analyze';
 
+const ALL: Permission[] = [
+  'inspection:create','inspection:read','inspection:update','inspection:delete',
+  'review:read','review:write',
+  'product:read',
+  'rule:read','rule:write','rule:publish',
+  'analytics:read',
+  'report:read','report:write',
+  'user:read','user:write',
+  'audit:read',
+  'config:read','config:write',
+  'ecommerce:analyze',
+];
+
 const rolePermissions: Record<Role, Permission[]> = {
-  SUPER_ADMIN: [
-    'inspection:create','inspection:read','inspection:update','inspection:delete',
+  SUPER_ADMIN: ALL,
+  REGULATORY_ADMIN: [
+    'inspection:read','inspection:update',
     'review:read','review:write',
-    'product:read','product:history',
+    'product:read',
     'rule:read','rule:write','rule:publish',
     'analytics:read',
-    'report:read','report:write','report:download',
-    'user:read','user:write',
+    'report:read','report:write',
     'audit:read',
     'config:read','config:write',
-    'ecommerce:analyze'
-  ],
-  REGULATORY_ADMIN: [
-    'inspection:read',
-    'product:read','product:history',
-    'rule:read','rule:write','rule:publish',
-    'analytics:read',
-    'report:read',
-    'config:read','config:write',
-    'audit:read'
   ],
   ENFORCEMENT_OFFICER: [
     'inspection:create','inspection:read','inspection:update',
+    'review:read','review:write',
     'product:read',
+    'rule:read',
     'report:read','report:write',
     'ecommerce:analyze',
-    'rule:read'
   ],
   REVIEWER: [
     'inspection:read','inspection:update',
     'review:read','review:write',
-    'product:read','product:history',
-    'report:read',
-    'rule:read'
+    'product:read',
+    'rule:read',
+    'report:read','report:write',
   ],
   ANALYST: [
     'inspection:read',
-    'product:read','product:history',
+    'product:read',
     'analytics:read',
-    'report:read','report:download',
+    'report:read','report:write',
     'rule:read',
-    'ecommerce:analyze'
+    'ecommerce:analyze',
   ],
   AUDITOR: [
     'inspection:read',
-    'product:read','product:history',
+    'product:read',
     'rule:read',
     'report:read',
     'audit:read',
-    'analytics:read'
+    'analytics:read',
   ],
 };
 
 export function hasPermission(role: Role, permission: Permission): boolean {
-  return rolePermissions[role]?.includes(permission) || false;
+  return rolePermissions[role]?.includes(permission) ?? false;
 }
 
-export function canAccessRoute(role: Role, path: string): boolean {
-  // Public routes
-  if (path === '/' || path.startsWith('/login')) return true;
+export function permissionsFor(role: Role): Permission[] {
+  return rolePermissions[role] ?? [];
+}
 
-  // Role-based route mapping
-  if (path.startsWith('/app/admin')) {
-    return ['SUPER_ADMIN','REGULATORY_ADMIN'].includes(role) || (role === 'AUDITOR' && path.includes('audit-log'));
-  }
-  if (path.startsWith('/app/rules') || path.startsWith('/app/rule-versions')) {
-    return hasPermission(role, 'rule:read');
-  }
-  if (path.startsWith('/app/review')) {
-    return hasPermission(role, 'review:read');
-  }
-  if (path.startsWith('/app/analytics')) {
-    return hasPermission(role, 'analytics:read');
-  }
-  // All authenticated can access dashboard, scan, products, reports, ecommerce
-  return true;
+/**
+ * The three roles the interface talks about. Additional backend roles are mapped onto
+ * one of these so ordinary users never have to reason about the full matrix.
+ */
+export function simpleRole(role: Role): SimpleRole {
+  if (role === 'REVIEWER') return 'REVIEWER';
+  if (role === 'SUPER_ADMIN' || role === 'REGULATORY_ADMIN') return 'ADMIN';
+  return 'INSPECTOR';
+}
+
+export const SIMPLE_ROLE_LABEL: Record<SimpleRole, string> = {
+  INSPECTOR: 'Inspector',
+  REVIEWER: 'Reviewer',
+  ADMIN: 'Administrator',
+};
+
+export const SIMPLE_ROLE_DESCRIPTION: Record<SimpleRole, string> = {
+  INSPECTOR: 'Captures packages and submits inspections',
+  REVIEWER: 'Reviews uncertain or flagged findings',
+  ADMIN: 'Manages rules, users and system configuration',
+};
+
+export const ADMIN_ROLES: Role[] = ['SUPER_ADMIN', 'REGULATORY_ADMIN'];
+
+export function isAdmin(role: Role): boolean {
+  return ADMIN_ROLES.includes(role) || role === 'AUDITOR';
 }

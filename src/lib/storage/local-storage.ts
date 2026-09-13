@@ -1,80 +1,117 @@
-import type { StorageProvider, StorageFile } from './storage';
-import { v4 as uuidv4 } from 'uuid';
+/**
+ * Evidence storage.
+ *
+ * Local disk provider by default. The interface is intentionally small so an S3 /
+ * object-storage provider can be dropped in later without touching callers.
+ */
 import fs from 'fs';
 import path from 'path';
+import { v4 as uuidv4 } from 'uuid';
+import { extensionFor } from '../images/inspect';
+
+export interface StoredImage {
+  id: string;
+  url: string;
+  filename: string;
+  size: number;
+  mimeType: string;
+}
+
+export interface StorageProvider {
+  save(buffer: Buffer, mimeType: string): Promise<StoredImage>;
+  read(id: string): Promise<{ buffer: Buffer; mimeType: string } | null>;
+  remove(id: string): Promise<boolean>;
+}
+
+const MIME_BY_EXTENSION: Record<string, string> = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
 
 class LocalStorageProvider implements StorageProvider {
-  private uploadDir: string;
+  private dir: string;
 
   constructor() {
-    this.uploadDir = process.env.STORAGE_PATH || './uploads';
-    // Ensure dir exists (only in Node environment)
-    if (typeof window === 'undefined') {
-      try {
-        if (!fs.existsSync(this.uploadDir)) {
-          fs.mkdirSync(this.uploadDir, { recursive: true });
-        }
-      } catch {}
+    this.dir = path.resolve(process.env.STORAGE_PATH || './uploads');
+    try {
+      fs.mkdirSync(this.dir, { recursive: true });
+    } catch (error) {
+      console.warn('[storage] could not create upload directory:', (error as Error).message);
     }
   }
 
-  async upload(file: Buffer | Uint8Array, filename: string, mimeType: string): Promise<StorageFile> {
-    const id = uuidv4();
-    const ext = path.extname(filename) || '.jpg';
-    const storedName = `${id}${ext}`;
-    
-    // In serverless/demo, we don't actually write file, just return mock URL
-    // But try to write if possible
-    if (typeof window === 'undefined') {
-      try {
-        const fullPath = path.join(this.uploadDir, storedName);
-        fs.writeFileSync(fullPath, file);
-      } catch (e) {
-        console.warn('Local storage write failed, using mock', e);
-      }
+  private findFile(id: string): string | null {
+    try {
+      const entries = fs.readdirSync(this.dir);
+      const match = entries.find((name) => name.startsWith(`${id}.`));
+      return match ? path.join(this.dir, match) : null;
+    } catch {
+      return null;
     }
+  }
 
-    const url = `/uploads/${storedName}`;
-    // For demo, return placeholder image if needed
-    const mockUrl = `/api/placeholder/image?text=${encodeURIComponent(filename)}`;
-
+  async save(buffer: Buffer, mimeType: string): Promise<StoredImage> {
+    const id = uuidv4();
+    const filename = `${id}.${extensionFor(mimeType)}`;
+    fs.writeFileSync(path.join(this.dir, filename), buffer);
     return {
       id,
-      url: mockUrl, // Use mock URL for reliable demo
-      path: storedName,
-      size: file.length,
+      url: `/api/images/${id}`,
+      filename,
+      size: buffer.length,
       mimeType,
     };
   }
 
-  async delete(fileId: string): Promise<boolean> {
+  async read(id: string) {
+    if (!/^[a-zA-Z0-9-]+$/.test(id)) return null;
+    const file = this.findFile(id);
+    if (!file) return null;
+    const ext = path.extname(file).slice(1).toLowerCase();
+    return {
+      buffer: fs.readFileSync(file),
+      mimeType: MIME_BY_EXTENSION[ext] || 'application/octet-stream',
+    };
+  }
+
+  async remove(id: string) {
+    const file = this.findFile(id);
+    if (!file) return false;
     try {
-      if (typeof window === 'undefined') {
-        const fullPath = path.join(this.uploadDir, fileId);
-        if (fs.existsSync(fullPath)) {
-          fs.unlinkSync(fullPath);
-        }
-      }
+      fs.unlinkSync(file);
       return true;
     } catch {
       return false;
     }
   }
+}
 
-  async getUrl(fileId: string): Promise<string> {
-    return `/uploads/${fileId}`;
+class StorageRegistry {
+  private providers = new Map<string, StorageProvider>();
+  private defaultProvider: string;
+
+  constructor() {
+    this.providers.set('local', new LocalStorageProvider());
+    this.defaultProvider = process.env.STORAGE_TYPE || 'local';
   }
 
-  async exists(fileId: string): Promise<boolean> {
-    if (typeof window === 'undefined') {
-      try {
-        return fs.existsSync(path.join(this.uploadDir, fileId));
-      } catch {
-        return false;
-      }
-    }
-    return true;
+  get(): StorageProvider {
+    return this.providers.get(this.defaultProvider) || this.providers.get('local')!;
+  }
+
+  save(buffer: Buffer, mimeType: string) {
+    return this.get().save(buffer, mimeType);
+  }
+
+  read(id: string) {
+    return this.get().read(id);
+  }
+
+  remove(id: string) {
+    return this.get().remove(id);
   }
 }
 
-export const localStorageProvider = new LocalStorageProvider();
+export const storage = new StorageRegistry();

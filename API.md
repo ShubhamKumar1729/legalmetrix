@@ -1,381 +1,233 @@
-# API Documentation — PackComply
+# API Reference
 
-## Base URL
+All responses use one envelope:
 
-- Dev: `http://localhost:3000/api`
-- Prod: `https://your-domain.com/api`
-
-## Response Format
-
-**Success:**
-```json
-{
-  "success": true,
-  "data": { ... }
-}
+```jsonc
+{ "success": true,  "data": { … } }
+{ "success": false, "error": { "code": "STRING", "message": "Human readable" } }
 ```
 
-**Error:**
-```json
-{
-  "success": false,
-  "error": {
-    "code": "AUTH_FAILED",
-    "message": "Invalid credentials",
-    "details": { ... }
-  }
-}
-```
+Every route except `POST /api/auth/login` and `GET /api/auth/status` requires the
+`legalmetrix_session` httpOnly cookie. Unauthenticated requests return `401`;
+authenticated callers without the required permission return `403`.
 
-**Status Codes:** 200 OK, 201 Created, 400 Validation, 401 Unauthorized, 403 Forbidden, 404 Not Found, 500 Server Error
+The **Permission** column refers to `src/lib/auth/rbac.ts`.
 
 ---
 
 ## Authentication
 
-### POST /api/auth/login
-
-**Request:**
-```json
-{
-  "email": "officer@gov.in",
-  "password": "Gov@2026"
-}
+### `POST /api/auth/login` — public
+```jsonc
+{ "email": "first.admin@legalmetrix.example", "password": "…" }
+→ 200 { user, simpleRole, simpleRoleLabel, permissions }   // sets the session cookie
+→ 401 AUTH_FAILED
 ```
+When no accounts exist the message explains how to create the first administrator.
+Sign-in is written to the audit log.
 
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "user": { "id": "user-officer", "email": "officer@gov.in", "name": "Rajesh Kumar", "role": "ENFORCEMENT_OFFICER", "officialId": "GOV-EO-042" },
-    "token": "jwt-token"
-  }
+### `POST /api/auth/logout`
+Clears the cookie and records a `LOGOUT` audit entry.
+
+### `GET /api/auth/me`
+`{ user, simpleRole, simpleRoleLabel, permissions, system }` where `system` reports
+the active data store, analysis provider, published rule count, account count,
+bootstrap state and upload constraints.
+
+### `GET /api/auth/status` — public, no credentials exposed
+`{ hasUsers, bootstrapConfigured, rulesPublished, aiDevelopmentMode, datastore }`
+
+---
+
+## Evidence images
+
+### `POST /api/images` — `inspection:create`
+`multipart/form-data`: `image` (File), `side`, `source` (`CAMERA` | `UPLOAD`),
+`quality` (optional JSON measured client-side).
+
+```jsonc
+→ 200 {
+  "id": "…", "url": "/api/images/…", "side": "FRONT", "source": "CAMERA",
+  "originalName": "…", "size": 184320, "mimeType": "image/jpeg",
+  "width": 900, "height": 640,
+  "quality": { "resolution": 640, "brightness": 0.62, "blurScore": 0.18, "readability": 0.79 },
+  "uploadedAt": "…"
 }
+→ 422 UNSUPPORTED_FORMAT | EMPTY_FILE | FILE_TOO_LARGE | UNREADABLE_IMAGE
+      | TRUNCATED_IMAGE | LOW_RESOLUTION
 ```
+Camera captures and uploads return the identical shape. The server validates the real
+file bytes, not the client's claims.
 
-**Notes:** Sets audit log LOGIN. Token stored in localStorage for demo, httpOnly cookie for production.
+### `GET /api/images` — `inspection:create`
+Upload constraints, so the UI can describe them accurately.
+
+### `GET /api/images/:id` — any signed-in user
+Streams the stored image. `401` without a session, `404` if absent.
 
 ---
 
 ## Inspections
 
-### GET /api/inspections
+### `GET /api/inspections?limit&status&q` — `inspection:read`
+`{ inspections: […], total }`, newest first.
 
-Query: `?status=REVIEW_REQUIRED&search=FreshBite&limit=50&skip=0`
+### `POST /api/inspections` — `inspection:create`
+```jsonc
+{ "productName": "…", "brand": "…", "category": "FOOD", "manufacturer": "…",
+  "barcode": "…", "batchNumber": "…", "source": "FIELD",
+  "images": [ { "id": "…", "side": "FRONT", "source": "CAMERA", "quality": { … } } ] }
+→ 201 Inspection (status DRAFT)
+```
+Validates required fields, enforces the image limit, and confirms every referenced
+image actually exists in storage. Creates the product record if this is the product's
+first inspection.
 
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "inspections": [ { "id": "insp-001", "inspectionId": "LM-2026-001042", "productName": "FreshBite Premium Biscuits", "status": "REVIEW_REQUIRED", "complianceScore": 82, ... } ],
-    "total": 3
-  }
-}
+### `GET /api/inspections/:id` — `inspection:read`
+Also resolves by `inspectionNumber`.
+
+### `PATCH /api/inspections/:id` — `inspection:update`
+Editable fields only: `reviewStatus`, `location`, `batchNumber`, `barcode`.
+
+### `POST /api/inspections/:id/analyze` — `inspection:update`
+Runs the provider, then the rule engine, then merges and scores.
+```jsonc
+→ 200 { "inspection": …, "aiResult": …, "ruleSummary": … }
+→ 422 if the inspection has no images
 ```
 
-### POST /api/inspections
-
-**Request:**
-```json
-{
-  "productName": "FreshBite Premium Biscuits",
-  "brand": "FreshBite",
-  "category": "FOOD",
-  "manufacturer": "FreshBite Foods Pvt Ltd",
-  "barcode": "8901234567890",
-  "images": [ { "id": "img-1", "side": "FRONT", "url": "/api/placeholder/image?text=Front", ... } ],
-  "source": "FIELD",
-  "location": { "latitude": 30.9009, "longitude": 75.8573 }
-}
+### `POST /api/inspections/:id/findings/:findingId` — `review:write`
+```jsonc
+{ "decision": "CONFIRM_VIOLATION" | "CONFIRM_PASS" | "CORRECT",
+  "correctedValue": "…",   // required for CORRECT
+  "comment": "…" }
+→ 200 { inspection, finding }
 ```
+Recomputes the score and status, and records who decided what.
 
-**Response:** Created inspection DRAFT
-
-### GET /api/inspections/[id]
-
-Param `id` can be internal `id` or human `inspectionId` (e.g., LM-2026-001042)
-
-**Response:** Full inspection with findings, extractedFields, images, etc.
-
-### PATCH /api/inspections/[id]
-
-**Request:** Partial update, e.g., `{ "status": "COMPLIANT", "reviewStatus": "COMPLETED" }`
-
-### POST /api/inspections/[id]/analyze
-
-Triggers AI + Rule Engine.
-
-**Request:** None (uses inspection data)
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "inspection": { ... updated with findings, score, status ... },
-    "aiResult": { "runId": "ai-run-xxx", "extractedFields": [...], "findings": [...], "confidence": {...}, "modelMetadata": {...} },
-    "ruleResult": { "findings": [...], "complianceScore": 82, ... }
-  }
-}
-```
-
-**Side Effects:** Updates inspection status to COMPLIANT/NON_COMPLIANT/REVIEW_REQUIRED, logs audit AI_ANALYSIS_COMPLETED
-
----
-
-## Products
-
-### GET /api/products
-
-Query: `?search=FreshBite&category=FOOD`
-
-**Response:** Enriched products with inspections count, violations, lastInspection
-
-### GET /api/products/[id]
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "product": { "id": "prod-freshbite", "name": "FreshBite Premium Biscuits", ... },
-    "inspections": [ ... ]
-  }
-}
-```
-
-### GET /api/products/[id]/history
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "history": [ ... inspections sorted desc ... ],
-    "trend": [ { "date": "2026-09-10", "score": 82, "status": "REVIEW_REQUIRED", "inspectionId": "LM-2026-001042" } ]
-  }
-}
-```
-
----
-
-## Rules
-
-### GET /api/rules
-
-**Response:** All rules sorted by ruleCode
-
-### POST /api/rules
-
-**Request:**
-```json
-{
-  "ruleCode": "LM-PC-2011-6(1)(e)",
-  "title": "MRP Declaration",
-  "description": "Retail sale price must be declared",
-  "legalReference": "Rule 6(1)(e)",
-  "category": "MRP",
-  "applicableProductCategories": ["ALL"],
-  "requirementType": "MANDATORY",
-  "validationLogic": { "field": "mrp", "operator": "exists" },
-  "severity": "CRITICAL",
-  "version": "1.2",
-  "status": "DRAFT"
-}
-```
-
-**Response:** Created rule, logs audit RULE_CREATED
-
-### GET /api/rules/[id]
-
-**Response:** Single rule
-
-### PATCH /api/rules/[id]
-
-**Request:** Partial update
-
-**Response:** Updated rule, logs audit RULE_UPDATED
-
-### POST /api/rules/[id]/versions (planned)
-
-Creates new version, clones rule, increments version.
-
-### POST /api/rule-versions/[id]/publish (planned)
-
-Publishes draft → PUBLISHED, validates, requires confirmation.
-
----
-
-## Analytics
-
-### GET /api/analytics
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "kpis": { "totalInspections": 3, "compliant": 1, "violations": 1, "reviewRequired": 1, "complianceRate": 33, "avgConfidence": 89, "pendingReviews": 1, "repeatOffenders": 1 },
-    "overTime": [ { "date": "2026-09-06", "inspections": 2, "compliant": 1, "violations": 1 } ],
-    "violationCategories": [ { "name": "CUSTOMER_CARE", "value": 1 } ],
-    "categoryDistribution": [ { "name": "FOOD", "value": 2 } ],
-    "repeatOffenders": [ { "manufacturer": "CleanCare Labs, Mumbai", "inspections": 1, "violations": 1, "violationRate": 100, "riskScore": 89, "trend": "increasing" } ],
-    "recentInspections": [ ... ]
-  }
-}
-```
+### `POST /api/inspections/:id/report` — `report:write`
+`422` if the inspection has not been analyzed. Idempotent: a second call returns the
+existing report.
 
 ---
 
 ## Reports
 
-### GET /api/reports
+### `GET /api/reports` — `report:read`
+`{ reports, total }` — only reports that were generated.
 
-**Response:** List of reports with reportId, inspectionNumber, productName, status, score, date, inspector, ruleVersion, aiModel
-
-### POST /api/reports
-
-**Request:**
-```json
-{ "inspectionId": "insp-001" }
-```
-
-**Response:** Generated report with content including inspection, findings, evidence, ruleSetVersion, aiRunId
-
-### GET /api/reports/[id] (via list filtering for demo)
-
-Returns report detail.
+### `GET /api/reports/:id` — `report:read`
+`{ report, inspection, auditTrail }` where the trail covers the inspection, every
+finding review and the report generation.
 
 ---
 
-## E-commerce
+## Products
 
-### POST /api/ecommerce/analyze
+### `GET /api/products?q` — `product:read`
+Each product carries `inspectionCount`, `violationCount`, `latestScore` and
+`riskScore`, all computed from stored inspections.
 
-**Request:**
-```json
-{
-  "url": "https://www.amazon.in/FreshBite-Premium-Biscuits-500g/dp/B0XXXX",
-  "packageInspectionId": "insp-001" // optional
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "listing": { "id": "uuid", "url": "...", "platform": "Amazon", "productName": "...", "mrp": "₹99", "netQuantity": "500 g", ... },
-    "packageData": { "mrp": "₹89", "netQuantity": "500 g", ... },
-    "comparison": [ { "field": "MRP", "listingValue": "₹99", "packageValue": "₹89", "match": false, "status": "VIOLATION" } ],
-    "overallStatus": "MISMATCH",
-    "complianceScore": 75
-  }
-}
-```
+### `GET /api/products/:id` — `product:read`
+`{ product, history, trend }`.
 
 ---
 
-## Audit Logs
+## Rules
 
-### GET /api/audit-logs
-
-Query: `?resource=INSPECTION&limit=100`
-
-**Response:** Array of audit logs with timestamp, userId, userName, role, action, resource, resourceId, oldValue, newValue, ip, comment
-
----
-
-## Search
-
-### GET /api/search
-
-Query: `?q=FreshBite`
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": [
-    { "type": "Inspection", "id": "insp-001", "title": "LM-2026-001042", "subtitle": "FreshBite Premium Biscuits", "href": "/app/scan/insp-001" },
-    { "type": "Product", "id": "prod-freshbite", "title": "FreshBite Premium Biscuits", "subtitle": "FreshBite", "href": "/app/products/prod-freshbite" },
-    { "type": "Rule", "id": "rule-004", "title": "LM-PC-2011-6(1)(e)", "subtitle": "MRP Declaration", "href": "/app/rules/rule-004" }
-  ]
-}
-```
+### `GET /api/rules` — `rule:read`
+### `POST /api/rules` — `rule:write` (publishing additionally needs `rule:publish`)
+Zod-validated payload; rejects a duplicate `ruleCode` + `version`.
+### `GET /api/rules/:id` — `rule:read` → `{ rule, versions }`
+### `PATCH /api/rules/:id` — `rule:write`
+### `POST /api/rules/:id/versions` — `rule:write`
+Creates the next draft version; the published version keeps applying until the new
+one is published.
 
 ---
 
 ## Users
 
-### GET /api/users
-
-**Response:** List of users with id, email, name, officialId, role, department, active, lastLogin
+### `GET /api/users` — `user:read`
+Returns accounts without password hashes.
+### `POST /api/users` — `user:write`
+`{ email, name, password (≥8 chars), role, officialId?, department? }`
+### `PATCH /api/users/:id` — `user:write`
+Cannot deactivate your own account.
 
 ---
+
+## Intelligence
+
+### `GET /api/analytics` — `analytics:read`
+```jsonc
+{ "kpis": { totalInspections, compliant, violations, reviewRequired, complianceRate,
+            avgConfidence, pendingReviews, products, reports, rulesPublished },
+  "hasData": false,
+  "overTime": [ { "date": "…", "inspections": 0, "compliant": 0, "violations": 0 } ],
+  "violationCategories": [], "categoryDistribution": [], "manufacturers": [] }
+```
+Every value is derived from stored inspections. Days without activity stay at zero.
+
+### `GET /api/notifications` — `inspection:read`
+Derived from findings awaiting review and generated reports. Empty list when there is
+nothing.
+
+### `GET /api/audit-logs?resource&limit` — `audit:read`
+### `GET /api/search?q` — `inspection:read`
+Searches real inspections, products and (with `rule:read`) rules.
+
+---
+
+## Assistant
+
+### `POST /api/assistant` — `inspection:read`
+
+```jsonc
+// request
+{ "question": "What failed?", "inspectionId": "…" }   // inspectionId is optional
+
+// response
+{
+  "answer": "LM-2026-000001 has 1 confirmed violation(s): …",
+  "groundedIn": ["LM-2026-000001", "LM-PC-2011-6(1)(e)"],
+  "answered": true,
+  "inspectionId": "…",
+  "source": "stored-records",
+  "needsInspection": false
+}
+```
+
+There is **no language model** behind this. It is a deterministic lookup over stored
+records, so it cannot invent a fact:
+
+- Without `inspectionId` it replies `Which inspection would you like me to look at?`
+  with `answered: false` rather than answering about an inspection it was not given.
+- An unknown `inspectionId` returns `404`; an empty question returns `400`.
+- A question the record cannot answer returns `answered: false` and says what it does
+  have, instead of guessing.
+- `groundedIn` lists the records the answer was built from.
+
+To attach a real assistant model later, replace `answerQuestion` in
+`src/lib/assistant/assistant.ts`. The route and the context object stay the same.
 
 ## Configuration
 
-### GET /api/configuration
-
-**Response:** SystemConfig with ai, compliance, inspection, system sections
-
-### PATCH /api/configuration
-
-**Request:** Partial SystemConfig update
-
-**Response:** Updated config
+### `GET /api/configuration` — `config:read` → `{ config, status }`
+### `PATCH /api/configuration` — `config:write`
+Recorded in the audit log.
 
 ---
 
-## Placeholder
+## E-commerce
 
-### GET /api/placeholder/image
-
-Query: `?text=FreshBite+Front`
-
-**Response:** SVG placeholder image (for demo when real images not available)
-
----
-
-## Error Handling
-
-All endpoints:
-
-- Validate input (Zod or manual)
-- Return 400 for validation errors
-- Return 401 if no token (except login, landing)
-- Return 403 if role lacks permission
-- Return 404 if not found
-- Return 500 for server errors (no stack trace leaked)
-- Log audit for important actions
-- Try MongoDB, fallback to memory, log warning
-
----
-
-## Rate Limiting (Future)
-
-- Implement per IP and per user
-- 100 req/min for inspections, 10 req/min for AI analyze
-
----
-
-## Security Headers
-
-Via `next.config.mjs`:
-
-- X-Frame-Options: DENY
-- X-Content-Type-Options: nosniff
-- Referrer-Policy: strict-origin-when-cross-origin
-
----
-
-## Testing
-
-- Unit: evaluator, scoring
-- API: auth, inspection creation, AI analysis, rule publishing, report gen, audit logging
-- Critical happy path: create inspection → analyze → review → report
-
-See `SECURITY.md` for auth/RBAC details.
+### `POST /api/ecommerce/analyze` — `ecommerce:analyze`
+```jsonc
+{ "url": "https://…", "inspectionId": "…" }
+→ 200 { listing, comparison, listingId }
+→ 501 PROVIDER_NOT_CONFIGURED   // no ECOMMERCE_API_URL configured
+→ 502 ANALYSIS_FAILED
+```
+### `GET /api/ecommerce/analyze` — `ecommerce:analyze` → `{ configured }`
+### `GET /api/ecommerce/listings` — `ecommerce:analyze`
+Only listings that were actually analyzed.

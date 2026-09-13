@@ -1,228 +1,128 @@
-# Rule Engine — PackComply
+# Rule Engine
 
-## Philosophy
+Rules are configuration, not code. Compliance logic lives in the database and is
+managed from **Rules** in the application; changing a rule never requires a deploy.
 
-**No hardcoded regulatory logic in UI.** All rules stored in DB, evaluated server-side via safe DSL.
+## What is evaluated
 
-Bad:
-```tsx
-if (mrpMissing) showViolation() // ❌ Hardcoded in component
-```
+`RuleEngine.getActiveRules()` selects rules that are `enabled` **and** `PUBLISHED`.
+When several versions of the same `ruleCode` are published, the highest version wins.
 
-Good:
-```
-AI output → normalized finding → Rule Engine → Decision → UI renders decision
-```
+If no rule qualifies, the engine returns zero findings and the note
+*"No regulatory rules are configured yet, so compliance could not be evaluated."*
+The inspection is marked `scored: false` and the result page says so. There is no
+built-in fallback rule set.
 
----
+## Rule shape
 
-## Rule Schema
-
-```typescript
+```jsonc
 {
-  id: string;
-  ruleCode: string;              // e.g., "LM-PC-2011-6(1)(e)" unique, indexed
-  title: string;                 // "MRP Declaration"
-  description: string;           // Human readable requirement
-  legalReference: string;        // "Rule 6(1)(e)"
-  category: string;              // MANUFACTURER_INFO, PRODUCT_IDENTITY, NET_QUANTITY, MRP, CONSUMER_CARE, READABILITY, DATE_DECLARATION, UNIT_PRICE, etc.
-  applicableProductCategories: string[]; // ["ALL"] or ["FOOD","GROCERY"]
-  requirementType: 'MANDATORY' | 'CONDITIONAL' | 'RECOMMENDED';
-  validationLogic: RuleCondition; // JSON DSL
-  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'WARNING';
-  enabled: boolean;
-  effectiveFrom: string;         // ISO date
-  effectiveTo?: string;
-  version: string;               // "1.2"
-  evidenceRequired: boolean;
-  reviewRequired: boolean;       // If true, low confidence → REVIEW not VIOLATION
-  status: 'DRAFT' | 'VALIDATION' | 'READY_FOR_APPROVAL' | 'APPROVED' | 'PUBLISHED' | 'ARCHIVED';
-  createdBy, updatedBy, createdAt, updatedAt, approvedBy, approvedAt, publishedBy, publishedAt
+  "ruleCode": "LM-PC-2011-6(1)(e)",
+  "title": "MRP declaration",
+  "description": "Retail sale price declared inclusive of all taxes",
+  "legalReference": "Rule 6(1)(e)",
+  "category": "MRP",
+  "applicableProductCategories": ["ALL"],
+  "requirementType": "MANDATORY",
+  "severity": "CRITICAL",
+  "validationLogic": { "field": "mrp", "operator": "exists" },
+  "reviewRequired": false,
+  "version": "1.0",
+  "status": "PUBLISHED"
 }
 ```
 
----
+`applicableProductCategories` may list specific categories (`FOOD`, `COSMETICS`, …)
+or `ALL`. Rules that do not apply to the inspected category are skipped.
 
-## Validation Logic DSL
+## Validation DSL
 
-Safe, no arbitrary JS. Evaluated by `evaluateCondition()` in `src/lib/rules/evaluator.ts`.
+A condition is either a field test or a logical combination:
 
-### Structure
-
-```typescript
-interface RuleCondition {
-  field?: string;                // e.g., "mrp", "net_quantity", "manufacturer_address", "category"
-  operator?: 'exists' | 'not_exists' | 'equals' | 'not_equals' | 'contains' | 'regex' | 'gt' | 'lt' | 'gte' | 'lte' | 'in' | 'not_in';
-  value?: any;
-  logic?: 'AND' | 'OR' | 'NOT';
-  conditions?: RuleCondition[];  // For logic operators
-}
-```
-
-### Operators
-
-- `exists`: field present and non-empty
-- `not_exists`: field missing
-- `equals`: == (loose)
-- `not_equals`: !=
-- `contains`: substring (case-insensitive) or array includes
-- `regex`: RegExp test
-- `gt`, `gte`, `lt`, `lte`: numeric comparison
-- `in`: value in array
-- `not_in`: value not in array
-
-### Logical
-
-- `AND`: all conditions must pass
-- `OR`: at least one passes
-- `NOT`: negates first condition
-
-### Examples
-
-**MRP must exist:**
-```json
+```jsonc
 { "field": "mrp", "operator": "exists" }
+{ "field": "net_quantity_value", "operator": "gte", "value": 1 }
+{ "field": "mrp", "operator": "regex", "value": "MRP\\s*[₹Rs]" }
+{ "logic": "AND", "conditions": [ … ] }
+{ "logic": "OR",  "conditions": [ … ] }
+{ "logic": "NOT", "conditions": [ … ] }
 ```
 
-**Net quantity >= 1000g requires unit price (conditional):**
-```json
-{
-  "logic": "AND",
-  "conditions": [
-    { "field": "category", "operator": "in", "value": ["FOOD", "GROCERY"] },
-    { "field": "net_quantity_value", "operator": "gte", "value": 1000 }
-  ]
-}
-```
+Operators: `exists`, `not_exists`, `equals`, `not_equals`, `contains`, `regex`, `gt`,
+`lt`, `gte`, `lte`, `in`, `not_in`.
 
-**Manufacturer address must contain PIN (regex):**
-```json
-{ "field": "manufacturer_address", "operator": "regex", "value": "\\d{6}" }
-```
+The evaluator (`src/lib/rules/evaluator.ts`) walks this structure directly — it never
+compiles or executes a string, so a rule cannot run arbitrary code, and every
+evaluation produces a human-readable `reason` that is stored on the finding.
 
----
+## Evaluation context
 
-## Evaluation Flow
+Built from the product metadata plus every field the analysis provider extracted:
 
-1. **Build Context** from extractedFields + productMetadata:
-   ```typescript
-   {
-     category: "FOOD",
-     product_name: "FreshBite Biscuits",
-     mrp: "₹99",
-     mrp_confidence: 98,
-     mrp_exists: true,
-     net_quantity: "500 g",
-     net_quantity_normalized: "500",
-     net_quantity_value: 500,
-     ...
-   }
-   ```
+| Key                        | Source                                        |
+| -------------------------- | --------------------------------------------- |
+| `product_name`, `brand`, `category`, `manufacturer` | inspection record       |
+| `<field>`                  | extracted value                               |
+| `<field>_normalized`       | normalized value                              |
+| `<field>_value`            | numeric form of the normalized value          |
+| `<field>_confidence`       | extraction confidence                         |
 
-2. **Get Active Rules**: `enabled=true && status=PUBLISHED`, filter by `applicableProductCategories` includes ALL or product category, optionally by `ruleSetVersion`
+## Decision logic
 
-3. **Evaluate Each Rule** via `evaluateCondition()`
+For each applicable rule, the engine evaluates the condition and looks up the
+extracted field named by `validationLogic.field` (or matching `ruleCode`).
 
-4. **Confidence-Aware Decision**:
-   - High confidence (>=90) + rule satisfied → PASS
-   - High confidence + rule violated → VIOLATION
-   - Medium confidence (75-89) + rule violated + reviewRequired → REVIEW (else VIOLATION)
-   - Low confidence (<75) → REVIEW
-   - Thresholds configurable via env / SystemConfig
+**Confidence is zero when nothing was extracted.** That is what routes findings to
+human review when no vision model is connected, instead of asserting violations the
+system cannot actually see.
 
-5. **Findings**: Create Finding per rule (or per violation), with severity, confidence, evidence, ruleCode, legalReference, reviewStatus
+| Condition | Confidence | Requirement | Result |
+| --------- | ---------- | ----------- | ------ |
+| passes    | ≥ medium (75) | any | `PASS`, auto-confirmed |
+| passes    | < medium   | any         | `REVIEW`, pending |
+| fails     | ≥ high (90) | mandatory   | `VIOLATION` |
+| fails     | ≥ medium   | mandatory, `reviewRequired` false | `VIOLATION` |
+| fails     | ≥ medium   | mandatory, `reviewRequired` true  | `REVIEW`, pending |
+| fails     | < medium   | mandatory   | `REVIEW`, pending |
+| fails     | any        | recommended | `WARNING` |
+| fails     | any        | conditional | `REVIEW`, pending |
 
-6. **Compliance Score**: `100 - (deductions / totalWeight * 100)`, deductions weighted by severity and confidence impact
+Thresholds come from `CONFIDENCE_THRESHOLD_HIGH` and `CONFIDENCE_THRESHOLD_MEDIUM`.
 
----
+## Scoring
 
-## Versioning & Publishing
+`calculateComplianceScore()` weights each finding by severity
+(CRITICAL 25, HIGH 15, MEDIUM 8, LOW 3, WARNING 1) and deducts:
 
-### Workflow
+- full weight for a `VIOLATION` (scaled slightly by confidence)
+- half weight for `REVIEW`
+- a quarter weight for `WARNING`
 
-```
-DRAFT
-  ↓ (validation)
-VALIDATION
-  ↓ (ready)
-READY_FOR_APPROVAL
-  ↓ (regulatory admin approves)
-APPROVED
-  ↓ (publish)
-PUBLISHED (active, used for new inspections)
-  ↓ (archived when superseded)
-ARCHIVED (historical, still referenced by old reports)
-```
+It returns `null` when there is nothing to score, so the UI can show *Not scored*
+rather than a misleading 100.
 
-### Guarantees
+`computeOutcome()` turns findings into the inspection status:
 
-- Never overwrite historical rules
-- Each inspection stores `ruleSetVersion` used (e.g., "LM-PC-2011-v1.2")
-- Historical reports remain reproducible
-- Draft can be cloned, edited, compared
-- Only REGULATORY_ADMIN / SUPER_ADMIN can publish
-- Publishing requires explicit confirmation dialog
+- any violation → `NON_COMPLIANT`
+- otherwise any finding in review, or any finding still `PENDING` → `REVIEW_REQUIRED`
+- otherwise `COMPLIANT` (or `REVIEW_REQUIRED` if the score falls below 80)
 
-### Implementation
+The same function is re-run after every human review decision, so the score and
+status always match the findings that actually exist.
 
-- Memory: `memoryDB.rules` with `status` field
-- MongoDB: `RegulatoryRuleModel` with `status` enum, `version`, `effectiveFrom/To`
-- API: `POST /api/rules` (create DRAFT), `PATCH /api/rules/[id]` (edit), `POST /api/rules/[id]/versions` (new version), `POST /api/rule-versions/[id]/publish` (publish)
+## Versioning
 
----
+*Create Version* clones a rule as a new draft with the next version number. The
+published version keeps applying until the new one is published, so rule changes are
+traceable and reversible. Every create, update, publish and version action is written
+to the audit log with the old and new values.
 
-## Rule Management UI
+## Permissions
 
-- List: search by code/title, filter by category/severity/status
-- Detail: view/edit, DSL preview ("IF: ... THEN: ..."), legal reference, effective dates
-- Editor: form with validation, JSON DSL editor (with helper), severity, categories, reviewRequired toggle
-- Preview: human-readable IF/THEN
-- Validation: checks for valid DSL, no empty fields, before publishing
-- Compare versions: diff view (future)
+| Action                       | Permission      |
+| ---------------------------- | --------------- |
+| Read rules                   | `rule:read`     |
+| Create / edit / new version  | `rule:write`    |
+| Publish                      | `rule:publish`  |
 
----
-
-## Scoring Configuration
-
-Stored in `SystemConfig` and `defaultScoringConfig`:
-
-```typescript
-{
-  weights: { CRITICAL: 25, HIGH: 15, MEDIUM: 8, LOW: 3, WARNING: 1 },
-  thresholds: { compliant: 80, review: 50 },
-  confidenceImpact: true
-}
-```
-
-Not hardcoded in UI — passed to `calculateComplianceScore()`.
-
----
-
-## Auditability
-
-Any change affecting compliance decisions logged:
-
-- Rule created/edited/published: oldValue, newValue, user, timestamp
-- Scoring config changed
-- Confidence threshold changed
-- Stored in `auditLogs`
-
----
-
-## Future Extensibility
-
-- Additional operators: add to evaluator (safe, no eval)
-- Additional regulatory frameworks: add category, legalReference
-- Additional languages: DSL already language-agnostic (field names)
-- Complex rules: nest AND/OR/NOT arbitrarily
-- ML-based rules: could add `ml_model` field referencing AI output
-
----
-
-## Testing
-
-- Unit tests for evaluator: each operator, AND/OR/NOT, edge cases
-- Integration: create rule, run inspection, verify finding status matches expected
-- Publishing workflow test
-
-See `src/lib/rules/evaluator.ts` for safe evaluation logic.
+`SUPER_ADMIN` and `REGULATORY_ADMIN` hold all three; other roles are read-only.

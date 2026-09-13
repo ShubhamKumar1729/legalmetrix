@@ -1,36 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
-import { mockAIProvider } from '@/lib/ai/mock-provider';
+import { requirePermission, isResponse } from '@/lib/auth/session';
+import { db } from '@/lib/db/repository';
+import { currentAIProvider, isDevelopmentAI } from '@/lib/ai/provider';
+import { mergeFindings } from '@/lib/ai/merge-findings';
 import { ruleEngine } from '@/lib/rules/engine';
-import { calculateComplianceScore, getComplianceStatus } from '@/lib/rules/scoring';
+import { computeOutcome } from '@/lib/rules/scoring';
 import { logAudit } from '@/lib/audit/audit';
+import { getSystemConfig } from '@/lib/config/system';
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
-  await seedMemoryDB();
-  const inspectionIdParam = params.id;
+/**
+ * Runs the analysis pipeline for one inspection:
+ *   stored images -> AI provider -> extracted fields -> rule engine -> findings -> outcome
+ *
+ * The provider is whatever AI_PROVIDER selects. With the default development provider no
+ * fields are extracted, so every configured rule becomes a finding that needs human
+ * confirmation — the pipeline behaves exactly the same once a real model is connected.
+ */
+export async function POST(_req: NextRequest, { params }: { params: { id: string } }) {
+  const user = requirePermission('inspection:update');
+  if (isResponse(user)) return user;
 
-  let inspection = await memoryDB.inspections.findById(inspectionIdParam);
-  if (!inspection) {
-    const all = memoryDB.inspections.all();
-    inspection = all.find(i => i.inspectionId === inspectionIdParam) || null;
-  }
-
+  const inspection = await db.inspections.get(params.id);
   if (!inspection) {
     return NextResponse.json({ success: false, error: { message: 'Inspection not found' } }, { status: 404 });
   }
+  if (inspection.images.length === 0) {
+    return NextResponse.json(
+      { success: false, error: { message: 'This inspection has no images to analyze.' } },
+      { status: 422 }
+    );
+  }
+
+  const config = getSystemConfig();
+
+  await db.inspections.update(inspection.id, { status: 'PROCESSING', updatedAt: new Date().toISOString() });
 
   try {
-    // Update to processing
-    await memoryDB.inspections.update(inspection.id, {
-      status: 'PROCESSING' as any,
-      updatedAt: new Date().toISOString(),
-    });
+    const provider = currentAIProvider();
 
-    // Call Mock AI Provider
-    const aiRequest = {
+    const aiResult = await provider.analyze({
       inspectionId: inspection.id,
-      imageIds: inspection.images.map(img => img.id),
-      imageUrls: inspection.images.map(img => img.url),
+      imageIds: inspection.images.map((image) => image.id),
+      imageUrls: inspection.images.map((image) => image.url),
       productMetadata: {
         productName: inspection.productName,
         brand: inspection.brand,
@@ -42,14 +53,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
         enableMultilingual: true,
         enableFontAnalysis: true,
         enableTamperingDetection: true,
-      }
-    };
+      },
+    });
 
-    const aiResult = await mockAIProvider.analyze(aiRequest);
-
-    // Run rule engine on top of AI results (defense in depth)
-    // The mock provider already returns findings, but we also run engine for real logic
     const ruleResult = await ruleEngine.evaluate({
+      inspectionId: inspection.id,
       extractedFields: aiResult.extractedFields,
       productMetadata: {
         productName: inspection.productName,
@@ -60,85 +68,77 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       ruleSetVersion: inspection.ruleSetVersion,
     });
 
-    // Merge AI findings with rule engine (use AI findings for demo reliability)
-    const findings = aiResult.findings.length > 0 ? aiResult.findings : ruleResult.findings;
-    const complianceScore = aiResult.findings.length > 0 
-      ? Math.round(findings.filter(f => f.status === 'PASS').length / Math.max(1, findings.length) * 100 * 0.8 + 20) // deterministic
-      : ruleResult.complianceScore;
+    const findings = mergeFindings(
+      ruleResult.findings,
+      aiResult.findings,
+      config.ai.confidenceThresholdMedium
+    );
+    const outcome = computeOutcome(findings);
 
-    // For FreshBite demo, force 82
-    let finalScore = complianceScore;
-    if (inspection.productName.toLowerCase().includes('freshbite')) {
-      finalScore = 82;
-    } else if (findings.length === 0) {
-      finalScore = 95;
-    } else {
-      // Calculate properly
-      const hasViolation = findings.some(f => f.status === 'VIOLATION');
-      const hasReview = findings.some(f => f.status === 'REVIEW');
-      if (hasViolation && findings.filter(f => f.status === 'VIOLATION').length >= 2) finalScore = 45;
-      else if (hasViolation) finalScore = 68;
-      else if (hasReview) finalScore = 82;
-      else finalScore = 96;
+    const notes = [...ruleResult.notes, ...(aiResult.warnings || [])];
+    if (isDevelopmentAI()) {
+      notes.unshift(
+        'Automated analysis is running without a vision model. Configure AI_PROVIDER and AI_SERVICE_URL to connect one.'
+      );
     }
 
-    const hasViolation = findings.some(f => f.status === 'VIOLATION');
-    const hasReview = findings.some(f => f.status === 'REVIEW');
-    let finalStatus: any = 'COMPLIANT';
-    if (hasViolation) finalStatus = 'NON_COMPLIANT';
-    else if (hasReview) finalStatus = 'REVIEW_REQUIRED';
+    const scored = outcome.score !== null;
+    const reviewPending = findings.some((f) => f.reviewStatus === 'PENDING');
 
-    // Override for demo data consistency
-    if (inspection.productName.toLowerCase().includes('freshbite')) finalStatus = 'REVIEW_REQUIRED';
-    if (inspection.productName.toLowerCase().includes('pureharvest')) finalStatus = 'COMPLIANT';
-    if (inspection.productName.toLowerCase().includes('cleancare')) finalStatus = 'NON_COMPLIANT';
-
-    const updated = await memoryDB.inspections.update(inspection.id, {
-      status: finalStatus,
-      complianceScore: finalScore,
-      confidenceSummary: {
-        average: aiResult.confidence.average,
-        min: aiResult.confidence.min,
-        max: aiResult.confidence.max,
-        lowConfidenceCount: aiResult.extractedFields.filter(f => f.confidence < 75).length,
-      },
+    const updated = await db.inspections.update(inspection.id, {
+      status: scored ? outcome.status : 'REVIEW_REQUIRED',
+      complianceScore: outcome.score ?? 0,
+      scored,
+      rulesEvaluated: ruleResult.evaluatedRules,
       findings,
       extractedFields: aiResult.extractedFields,
+      confidenceSummary: {
+        average: aiResult.confidence?.average ?? 0,
+        min: aiResult.confidence?.min ?? 0,
+        max: aiResult.confidence?.max ?? 0,
+        lowConfidenceCount: aiResult.extractedFields.filter((f) => f.confidence < config.ai.confidenceThresholdMedium)
+          .length,
+      },
       aiRunId: aiResult.runId,
-      reviewStatus: hasReview || hasViolation ? 'PENDING' : 'NOT_REQUIRED',
+      aiProvider: aiResult.modelMetadata.provider,
+      aiModelVersion: aiResult.modelMetadata.modelVersion,
+      processingTimeMs: aiResult.modelMetadata.processingTimeMs,
+      analysisNotes: notes,
+      reviewStatus: reviewPending ? 'PENDING' : 'NOT_REQUIRED',
       completedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
 
     await logAudit({
-      userId: inspection.inspectorId,
-      userName: inspection.inspectorName,
-      role: 'ENFORCEMENT_OFFICER',
-      action: 'AI_ANALYSIS_COMPLETED',
+      userId: user.id,
+      userName: user.name,
+      role: user.role,
+      action: 'INSPECTION_ANALYZED',
       resource: 'INSPECTION',
       resourceId: inspection.id,
-      newValue: { 
-        aiRunId: aiResult.runId, 
-        modelVersion: aiResult.modelMetadata.modelVersion,
-        complianceScore: finalScore,
-        findingsCount: findings.length,
+      newValue: {
+        aiRunId: aiResult.runId,
+        aiModelVersion: aiResult.modelMetadata.modelVersion,
+        rulesEvaluated: ruleResult.evaluatedRules,
+        findings: findings.length,
+        status: updated?.status,
       },
     });
 
-    return NextResponse.json({ 
-      success: true, 
-      data: {
-        inspection: updated,
-        aiResult,
-        ruleResult,
-      }
+    return NextResponse.json({
+      success: true,
+      data: { inspection: updated, aiResult, ruleSummary: ruleResult },
     });
-  } catch (e) {
-    console.error('Analyze error', e);
-    await memoryDB.inspections.update(inspection.id, {
-      status: 'DRAFT' as any,
+  } catch (error) {
+    console.error('[analyze] failed:', error);
+    await db.inspections.update(inspection.id, {
+      status: 'DRAFT',
+      analysisNotes: [`Analysis failed: ${(error as Error).message}`],
       updatedAt: new Date().toISOString(),
     });
-    return NextResponse.json({ success: false, error: { message: 'AI analysis failed' } }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: { message: `Analysis failed: ${(error as Error).message}` } },
+      { status: 500 }
+    );
   }
 }

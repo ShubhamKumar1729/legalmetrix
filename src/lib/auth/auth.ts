@@ -1,12 +1,22 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { memoryDB, seedMemoryDB } from '../db/memory-store';
-import { connectDB, isDBConnected } from '../db/connection';
-import { UserModel } from '../db/models';
+import { db } from '../db/repository';
+import { ensureBootstrapAdmin } from '../db/bootstrap';
 import type { Role, User } from '@/types';
 
-const SECRET = process.env.AUTH_SECRET || 'dev-secret-key-for-sih-26034-must-be-32-chars-long';
+function getSecret(): string {
+  const secret = process.env.AUTH_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('AUTH_SECRET must be set in production');
+    }
+    return 'legalmetrix-development-secret-change-me-32chars';
+  }
+  return secret;
+}
+
 const EXPIRES_IN = process.env.AUTH_EXPIRES_IN || '7d';
+export const SESSION_COOKIE = 'legalmetrix_session';
 
 export interface SessionUser {
   id: string;
@@ -21,170 +31,69 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  if (!hash) return false;
   return bcrypt.compare(password, hash);
 }
 
 export function generateToken(user: SessionUser): string {
-  return jwt.sign(user, SECRET, { expiresIn: EXPIRES_IN } as any);
+  return jwt.sign(user, getSecret(), { expiresIn: EXPIRES_IN } as jwt.SignOptions);
 }
 
 export function verifyToken(token: string): SessionUser | null {
   try {
-    return jwt.verify(token, SECRET) as SessionUser;
+    const decoded = jwt.verify(token, getSecret()) as SessionUser & { iat: number; exp: number };
+    return {
+      id: decoded.id,
+      email: decoded.email,
+      name: decoded.name,
+      role: decoded.role,
+      officialId: decoded.officialId || '',
+    };
   } catch {
     return null;
   }
 }
 
-// Ensure default users exist
-const DEFAULT_PASSWORD_HASH = bcrypt.hashSync('Gov@2026', 10);
+/**
+ * Verifies credentials against the user collection.
+ * There are no built-in or hard-coded accounts.
+ */
+export async function authenticateUser(
+  email: string,
+  password: string
+): Promise<{ user: SessionUser; token: string } | null> {
+  await ensureBootstrapAdmin();
 
-export async function ensureDefaultUsers() {
-  await seedMemoryDB();
-  // In-memory users already seeded, but ensure password hash exists in model layer
-  // For MongoDB path, create if not exists
-  try {
-    const connected = await connectDB();
-    if (connected && isDBConnected()) {
-      const count = await UserModel.countDocuments();
-      if (count === 0) {
-        await UserModel.create([
-          {
-            email: 'admin@gov.in',
-            name: 'Super Administrator',
-            officialId: 'GOV-SA-001',
-            role: 'SUPER_ADMIN',
-            department: 'Department of Consumer Affairs',
-            passwordHash: DEFAULT_PASSWORD_HASH,
-            active: true,
-          },
-          {
-            email: 'officer@gov.in',
-            name: 'Rajesh Kumar',
-            officialId: 'GOV-EO-042',
-            role: 'ENFORCEMENT_OFFICER',
-            department: 'Legal Metrology - Punjab',
-            passwordHash: DEFAULT_PASSWORD_HASH,
-            active: true,
-          },
-          {
-            email: 'reviewer@gov.in',
-            name: 'Priya Sharma',
-            officialId: 'GOV-RV-018',
-            role: 'REVIEWER',
-            department: 'Legal Metrology - Central',
-            passwordHash: DEFAULT_PASSWORD_HASH,
-            active: true,
-          },
-          {
-            email: 'analyst@gov.in',
-            name: 'Amit Patel',
-            officialId: 'GOV-AN-007',
-            role: 'ANALYST',
-            department: 'Enforcement Analytics',
-            passwordHash: DEFAULT_PASSWORD_HASH,
-            active: true,
-          },
-        ]);
-      }
-    }
-  } catch (e) {
-    console.warn('ensureDefaultUsers mongo error', e);
-  }
-}
+  const normalized = email.trim().toLowerCase();
+  const record = await db.users.findOne({ email: normalized });
+  if (!record || !record.active) return null;
 
-export async function authenticateUser(email: string, password: string): Promise<{ user: SessionUser; token: string } | null> {
-  await ensureDefaultUsers();
+  const valid = await verifyPassword(password, record.passwordHash || '');
+  if (!valid) return null;
 
-  // Try memory first (demo mode)
-  if (process.env.NEXT_PUBLIC_DEMO_MODE === 'true') {
-    const memUser = await memoryDB.users.findOne({ email } as any);
-    if (memUser) {
-      // For demo, accept Gov@2026 or any password if user exists, but verify against known
-      const valid = password === 'Gov@2026' || await verifyPassword(password, DEFAULT_PASSWORD_HASH);
-      if (valid) {
-        const sessionUser: SessionUser = {
-          id: memUser.id,
-          email: memUser.email,
-          name: memUser.name,
-          role: memUser.role,
-          officialId: memUser.officialId,
-        };
-        const token = generateToken(sessionUser);
-        return { user: sessionUser, token };
-      }
-    }
-  }
+  const sessionUser: SessionUser = {
+    id: record.id,
+    email: record.email,
+    name: record.name,
+    role: record.role,
+    officialId: record.officialId,
+  };
 
-  // Try MongoDB
-  try {
-    const connected = await connectDB();
-    if (connected) {
-      const dbUser = await UserModel.findOne({ email, active: true });
-      if (dbUser) {
-        const valid = await verifyPassword(password, dbUser.passwordHash);
-        if (valid) {
-          const sessionUser: SessionUser = {
-            id: dbUser._id.toString(),
-            email: dbUser.email,
-            name: dbUser.name,
-            role: dbUser.role as Role,
-            officialId: dbUser.officialId,
-          };
-          const token = generateToken(sessionUser);
-          // Update lastLogin
-          dbUser.lastLogin = new Date();
-          await dbUser.save();
-          return { user: sessionUser, token };
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('Mongo auth failed, fallback to memory', e);
-  }
+  await db.users
+    .update(record.id, { lastLogin: new Date().toISOString() } as Partial<User & { passwordHash: string }>)
+    .catch(() => null);
 
-  // Final fallback: check memory with hash
-  const memUser = await memoryDB.users.findOne({ email } as any);
-  if (memUser) {
-    // Accept demo password
-    if (password === 'Gov@2026') {
-      const sessionUser: SessionUser = {
-        id: memUser.id,
-        email: memUser.email,
-        name: memUser.name,
-        role: memUser.role,
-        officialId: memUser.officialId,
-      };
-      const token = generateToken(sessionUser);
-      return { user: sessionUser, token };
-    }
-  }
-
-  return null;
+  return { user: sessionUser, token: generateToken(sessionUser) };
 }
 
 export async function getUserById(id: string): Promise<User | null> {
-  await seedMemoryDB();
-  const mem = await memoryDB.users.findById(id);
-  if (mem) return mem;
-  try {
-    const connected = await connectDB();
-    if (connected) {
-      const dbUser = await UserModel.findById(id);
-      if (dbUser) {
-        return {
-          id: dbUser._id.toString(),
-          email: dbUser.email,
-          name: dbUser.name,
-          officialId: dbUser.officialId,
-          role: dbUser.role as Role,
-          department: dbUser.department,
-          active: dbUser.active,
-          lastLogin: dbUser.lastLogin?.toISOString(),
-          createdAt: dbUser.createdAt.toISOString(),
-        };
-      }
-    }
-  } catch {}
-  return null;
+  const record = await db.users.get(id);
+  if (!record) return null;
+  const { passwordHash: _ignored, ...user } = record;
+  return user as User;
+}
+
+export function publicUser(record: { passwordHash?: string } & Record<string, any>) {
+  const { passwordHash: _ignored, ...rest } = record;
+  return rest;
 }

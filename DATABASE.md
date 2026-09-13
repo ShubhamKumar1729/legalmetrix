@@ -1,298 +1,96 @@
-# Database Design — PackComply
+# Database
 
-## Overview
+Two interchangeable stores, one access layer.
 
-- **Primary:** MongoDB + Mongoose
-- **Fallback:** In-memory store (`memory-store.ts`) for demo without MongoDB
-- **Connection:** `connectDB()` with 2s timeout, falls back gracefully
+- **MongoDB** when `MONGODB_URI` is set and reachable — persistent, for real use.
+- **In-memory** otherwise — so the application runs in a sandbox. Data is lost on
+  restart, and the Admin page shows which store is active.
+
+Both start empty. **Nothing is seeded.** There is no seed script, no fixture file and
+no startup routine that inserts business records. The only record the application
+ever creates by itself is the optional bootstrap administrator, and only when the
+user collection is empty and `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_PASSWORD`
+are set.
 
 ## Collections
 
-### users
+### `users`
+| Field          | Type   | Notes                              |
+| -------------- | ------ | ---------------------------------- |
+| `email`        | string | unique, lowercased                 |
+| `name`         | string |                                    |
+| `officialId`   | string | optional                           |
+| `role`         | string | one of the six backend roles       |
+| `department`   | string | optional                           |
+| `passwordHash` | string | bcrypt (cost 10); never returned by the API |
+| `active`       | bool   | disabled accounts cannot sign in   |
+| `lastLogin`    | date   |                                    |
 
-```typescript
-{
-  _id: ObjectId,
-  email: string unique indexed,
-  name: string,
-  officialId: string unique,
-  role: 'SUPER_ADMIN' | 'REGULATORY_ADMIN' | 'ENFORCEMENT_OFFICER' | 'REVIEWER' | 'ANALYST' | 'AUDITOR',
-  department: string,
-  passwordHash: string,
-  active: boolean,
-  lastLogin: Date,
-  createdAt, updatedAt
-}
+### `inspections`
+The core record. Embedded arrays keep an inspection self-contained.
+
+- Identity: `inspectionNumber` (`LM-<year>-<6 digits>`, unique), `productId`,
+  `productName`, `brand`, `category`, `manufacturer`, `barcode`, `batchNumber`
+- Ownership: `inspectorId`, `inspectorName`
+- Lifecycle: `status` (`DRAFT` → `PROCESSING` → `COMPLIANT` / `NON_COMPLIANT` /
+  `REVIEW_REQUIRED`), `startedAt`, `completedAt`, `reviewStatus`
+- Evidence: `images[]` — `id`, `side`, `url`, `source` (`CAMERA` | `UPLOAD`),
+  `originalName`, `size`, `mimeType`, `width`, `height`,
+  `quality { resolution, brightness?, blurScore?, readability? }`
+- Analysis: `aiRunId`, `aiProvider`, `aiModelVersion`, `processingTimeMs`,
+  `ruleSetVersion`, `rulesEvaluated`, `complianceScore`, `scored`,
+  `confidenceSummary`, `extractedFields[]`, `analysisNotes[]`
+- Outcome: `findings[]` — `id`, `title`, `description`, `detectedValue`,
+  `expectedValue`, `status`, `severity`, `confidence`, `ruleId`, `ruleCode`,
+  `legalReference`, `evidence[]`, `reviewStatus`, `correctedValue`, `reviewerId`,
+  `reviewerName`, `reviewerComment`, `reviewedAt`
+- `reportId`
+
+`scored` is `false` when no rule could be evaluated, so the UI can show *Not scored*
+instead of implying a result.
+
+### `products`
+Created automatically the first time a product name is inspected. Inspection counts,
+violation counts and risk scores are computed from stored inspections at read time,
+never stored as static numbers.
+
+### `reports`
+One per generated report: `reportNumber` (`RPT-<inspection number>`), `inspectionId`,
+summary, outcome, score, `generatedBy`, `generatedByName`. The report body is read
+live from the inspection, so a report always reflects the stored record.
+
+### `regulatoryrules`
+Rule code, title, description, legal reference, category, applicable product
+categories, requirement type, `validationLogic` (JSON condition), severity, `enabled`,
+effective dates, `version`, `evidenceRequired`, `reviewRequired`, `status`. Several
+versions of a rule code can coexist; the engine evaluates the newest published one.
+
+### `auditlogs`
+`timestamp`, `userId`, `userName`, `role`, `action`, `resource`, `resourceId`,
+`oldValue`, `newValue`, `ip`, `comment`. Append-only from the application's point of
+view — no route updates or deletes audit entries.
+
+### `ecommercelistings`
+Only written when a configured provider returns real listing data.
+
+## Accessing the data
+
+Always through `src/lib/db/repository.ts`:
+
+```ts
+import { db } from '@/lib/db/repository';
+
+const inspections = await db.inspections.list({ status: 'NON_COMPLIANT' }, { sortDescBy: 'createdAt' });
+const inspection  = await db.inspections.get(id);
+const created     = await db.inspections.create(payload);
+const updated     = await db.inspections.update(id, { status: 'COMPLIANT' });
+const count       = await db.inspections.count({});
 ```
 
-**Indexes:** email unique, officialId unique
+Mongo document `_id` values are mapped to `id` strings by the repository, so callers
+never depend on the store in use.
 
-**Seed:** 4 demo users with password `Gov@2026` (bcrypt hash)
+## Resetting
 
-### regulatoryrules
-
-```typescript
-{
-  _id: ObjectId,
-  ruleCode: string unique indexed, // e.g., "LM-PC-2011-6(1)(e)"
-  title: string,
-  description: string,
-  legalReference: string,
-  category: string indexed, // MANUFACTURER_INFO, etc.
-  applicableProductCategories: string[],
-  requirementType: 'MANDATORY' | 'CONDITIONAL' | 'RECOMMENDED',
-  validationLogic: { field, operator, value, logic, conditions },
-  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'WARNING',
-  enabled: boolean,
-  effectiveFrom: Date,
-  effectiveTo: Date,
-  version: string,
-  evidenceRequired: boolean,
-  reviewRequired: boolean,
-  status: 'DRAFT' | 'VALIDATION' | 'READY_FOR_APPROVAL' | 'APPROVED' | 'PUBLISHED' | 'ARCHIVED',
-  createdBy, updatedBy, approvedBy, approvedAt, publishedBy, publishedAt,
-  createdAt, updatedAt
-}
-```
-
-**Indexes:** ruleCode unique, category, status, version
-
-**Seed:** 8 rules covering LM-PC-2011 6(1)(a)-(f), 8, 10
-
-### inspections
-
-```typescript
-{
-  _id: ObjectId,
-  inspectionId: string unique indexed, // e.g., "LM-2026-001042"
-  productId: string indexed,
-  productName: string text indexed,
-  brand: string indexed,
-  category: string indexed,
-  manufacturer: string text indexed,
-  barcode: string indexed,
-  batchNumber: string,
-  inspectorId: string indexed,
-  inspectorName: string,
-  status: 'DRAFT' | 'PROCESSING' | 'REVIEW_REQUIRED' | 'COMPLIANT' | 'NON_COMPLIANT' indexed,
-  source: 'FIELD' | 'ECOMMERCE' | 'UPLOAD',
-  images: [{
-    _id: ObjectId,
-    side: 'FRONT' | 'BACK' | 'SIDE' | 'TOP' | 'BOTTOM' | 'ADDITIONAL',
-    url: string,
-    originalName: string,
-    size: number,
-    mimeType: string,
-    quality: { resolution, blurScore, brightness, readability, coverage },
-    uploadedAt: Date
-  }],
-  location: { latitude, longitude, accuracy, address },
-  startedAt: Date,
-  completedAt: Date,
-  aiRunId: string,
-  ruleSetVersion: string, // e.g., "LM-PC-2011-v1.2" — for reproducibility
-  complianceScore: number,
-  confidenceSummary: { average, min, max, lowConfidenceCount },
-  findings: [{
-    _id: ObjectId,
-    declarationType: string,
-    title: string,
-    description: string,
-    detectedValue: string,
-    expectedValue: string,
-    status: 'PASS' | 'VIOLATION' | 'WARNING' | 'REVIEW',
-    severity: string,
-    confidence: number,
-    ruleId: string,
-    ruleCode: string,
-    legalReference: string,
-    evidence: [{ imageId, boundingBox: { x, y, width, height }, croppedUrl }],
-    reviewStatus: string,
-    correctedValue: string,
-    reviewerId, reviewerComment,
-    createdAt
-  }],
-  extractedFields: [{
-    fieldName: string,
-    value: string,
-    normalizedValue: string,
-    rawText: string,
-    language: string,
-    script: string,
-    confidence: number,
-    sourceImageId: string,
-    boundingBox: { x, y, width, height },
-    status: string,
-    editable: boolean,
-    reviewStatus: string,
-    ruleCode: string
-  }],
-  reviewStatus: 'NOT_REQUIRED' | 'PENDING' | 'IN_REVIEW' | 'COMPLETED',
-  reportId: string,
-  createdAt, updatedAt
-}
-```
-
-**Indexes:** inspectionId unique, productId, productName text, brand, category, manufacturer text, barcode, inspectorId, status, createdAt desc, text index on productName+brand+manufacturer
-
-**Seed:** 3 inspections with realistic findings
-
-### auditlogs
-
-```typescript
-{
-  _id: ObjectId,
-  timestamp: Date indexed,
-  userId: string indexed,
-  userName: string,
-  role: string,
-  action: string indexed, // LOGIN, INSPECTION_CREATED, AI_ANALYSIS_COMPLETED, RULE_CREATED, etc.
-  resource: string indexed, // AUTH, INSPECTION, RULE, REPORT, USER
-  resourceId: string indexed,
-  oldValue: Mixed,
-  newValue: Mixed,
-  ip: string,
-  comment: string
-}
-```
-
-**Indexes:** timestamp, userId, action, resource, resourceId
-
-### reports
-
-```typescript
-{
-  _id: ObjectId,
-  reportId: string unique, // RPT-LM-2026-001042
-  inspectionId: string indexed,
-  productName: string,
-  status: string,
-  complianceScore: number,
-  ruleSetVersion: string,
-  aiModelVersion: string,
-  generatedBy: string,
-  generatedAt: Date,
-  content: Mixed, // full inspection + findings + evidence + audit
-  createdAt, updatedAt
-}
-```
-
-### Additional Collections (Planned)
-
-- productImages — separate if images large, reference via storage abstraction
-- extractedFields — could be separate for querying, currently embedded
-- evidence — immutable, separate collection with hash
-- reviews — reviewer decisions, linked to findings
-- ruleVersions, ruleSets — for versioning
-- ecommerceListings — URL, platform, extracted data, comparison
-- analyticsSnapshots — cached aggregates
-- notifications — userId, type, read, etc.
-- systemConfigurations — AI thresholds, scoring weights
-- aiModelRuns — runId, inspectionId, provider, modelName, version, request, results, status
-- syncQueue — offline-first, local drafts
-
-## In-Memory Store
-
-**File:** `src/lib/db/memory-store.ts`
-
-- `MemoryCollection<T>` — Map-based, methods: create, findById, findOne, find (with query, limit, skip, sort), update, delete, count, clear, all
-- `memoryDB` — object with collections: users, inspections, rules, auditLogs, ecommerceListings, products, reports, notifications
-- `seedMemoryDB()` — idempotent, seeds if empty
-
-**Why:** Ensures demo works without MongoDB, deterministic data for jury, no external dependencies.
-
-## Connection Logic
-
-```typescript
-// src/lib/db/connection.ts
-export async function connectDB(): Promise<boolean> {
-  if (isConnected) return true;
-  try {
-    await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 2000 });
-    isConnected = true;
-    return true;
-  } catch {
-    return false; // fallback to memory
-  }
-}
-```
-
-- If `NEXT_PUBLIC_DEMO_MODE=true` or MongoDB unavailable, uses memory
-- All services try MongoDB first, catch and fallback to memory
-- Logs status
-
-## Data Model: Inspection
-
-See `src/types/index.ts` for full Inspection interface.
-
-Key fields for traceability:
-
-- `inspectionId` — human-readable, e.g., LM-2026-001042
-- `productId` — links to product repository
-- `images[]` — with quality metrics, side, url, uploadedAt
-- `location` — optional lat/lng, accuracy, address
-- `aiRunId` — links to AI run
-- `ruleSetVersion` — exact version used, for reproducibility
-- `complianceScore` — 0-100
-- `confidenceSummary` — avg, min, max, lowConfidenceCount
-- `findings[]` — with ruleId, ruleCode, legalReference, evidence bounding boxes, reviewStatus, correctedValue
-- `extractedFields[]` — with language, script, confidence, boundingBox, editable
-- `reviewStatus` — PENDING, IN_REVIEW, COMPLETED, NOT_REQUIRED
-- `reportId` — links to report
-
-## Data Model: AI Run
-
-Not yet separate collection, but stored in inspection + audit log. Future:
-
-```typescript
-{
-  runId,
-  inspectionId,
-  provider: 'mock' | 'real',
-  modelName, modelVersion,
-  requestMetadata,
-  processingStages,
-  results,
-  startedAt, completedAt,
-  status,
-  errors
-}
-```
-
-## Indexing Strategy
-
-- **Unique:** inspectionId, reportId, ruleCode, email, officialId
-- **Indexed:** status, category, brand, barcode, manufacturer, inspectorId, userId, action, resource
-- **Text:** productName, brand, manufacturer (for search)
-- **Sort:** createdAt desc for recent inspections
-- **Avoid:** Loading thousands at once — use pagination (limit/skip), server-side filtering
-
-## Seeding
-
-Run `npm run seed` or auto-seeds on first API call. Creates:
-
-- Users: admin, officer, reviewer, analyst (Gov@2026)
-- Rules: 8 LM-PC-2011 rules
-- Inspections: FreshBite (REVIEW_REQUIRED 82), PureHarvest (COMPLIANT 96), CleanCare (NON_COMPLIANT 45)
-- Products: 5 with risk scores
-- Audit logs: demo
-
-## Retention & Archival
-
-- `system.retentionDays` = 365 (configurable)
-- Archived rules: status ARCHIVED, still referenced by old inspections/reports
-- Reports: never deleted, only archived
-
-## Future: Real MongoDB
-
-- Set `MONGODB_URI` in .env
-- App will auto-connect, seed if empty
-- All memory operations have MongoDB equivalents already coded (try/catch fallback)
-- For production, remove memory fallback or keep as cache
-
-## Security
-
-- No passwords in logs
-- Audit logs read-only for normal admins
-- Evidence immutable — changes create new audit entry
-- Location optional, not required
+Drop the collections (MongoDB) or restart the process (in-memory). The application
+comes back with zero records and shows its empty states.

@@ -1,53 +1,58 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
-import { v4 as uuidv4 } from 'uuid';
+import { requirePermission, isResponse, badRequest } from '@/lib/auth/session';
+import { db } from '@/lib/db/repository';
 import { logAudit } from '@/lib/audit/audit';
+import { ruleInputSchema } from '@/lib/rules/validation';
+import type { RegulatoryRule } from '@/types';
 
 export async function GET() {
-  await seedMemoryDB();
-  const rules = memoryDB.rules.all().sort((a, b) => a.ruleCode.localeCompare(b.ruleCode));
-  return NextResponse.json({ success: true, data: rules });
+  const user = requirePermission('rule:read');
+  if (isResponse(user)) return user;
+
+  const rules = await db.rules.list();
+  const sorted = rules.sort((a, b) => a.ruleCode.localeCompare(b.ruleCode) || b.version.localeCompare(a.version));
+  return NextResponse.json({ success: true, data: { rules: sorted, total: sorted.length } });
 }
 
 export async function POST(req: NextRequest) {
-  await seedMemoryDB();
-  const body = await req.json();
+  const user = requirePermission('rule:write');
+  if (isResponse(user)) return user;
 
-  const rule: any = {
-    id: uuidv4(),
-    ruleCode: body.ruleCode || `LM-PC-2011-${Date.now()}`,
-    title: body.title,
-    description: body.description,
-    legalReference: body.legalReference,
-    category: body.category,
-    applicableProductCategories: body.applicableProductCategories || ['ALL'],
-    requirementType: body.requirementType || 'MANDATORY',
-    validationLogic: body.validationLogic || { field: 'mrp', operator: 'exists' },
-    severity: body.severity || 'MEDIUM',
-    enabled: body.enabled ?? true,
-    effectiveFrom: body.effectiveFrom || new Date().toISOString(),
-    effectiveTo: body.effectiveTo,
-    version: body.version || '1.0',
-    evidenceRequired: body.evidenceRequired ?? true,
-    reviewRequired: body.reviewRequired ?? false,
-    createdBy: body.createdBy || 'user-super-admin',
-    updatedBy: body.createdBy || 'user-super-admin',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    status: body.status || 'DRAFT',
-  };
+  const body = await req.json().catch(() => ({}));
+  const parsed = ruleInputSchema.safeParse(body);
+  if (!parsed.success) {
+    return badRequest(parsed.error.issues.map((i) => i.message).join(' '));
+  }
 
-  await memoryDB.rules.create(rule);
+  // Publishing a rule is a separate authority from authoring one.
+  if (parsed.data.status === 'PUBLISHED') {
+    const publisher = requirePermission('rule:publish');
+    if (isResponse(publisher)) return publisher;
+  }
+
+  const duplicate = await db.rules.findOne({ ruleCode: parsed.data.ruleCode, version: parsed.data.version });
+  if (duplicate) {
+    return badRequest(`Rule ${parsed.data.ruleCode} v${parsed.data.version} already exists.`);
+  }
+
+  const now = new Date().toISOString();
+  const rule = await db.rules.create({
+    ...parsed.data,
+    createdBy: user.id,
+    updatedBy: user.id,
+    createdAt: now,
+    updatedAt: now,
+  } as Omit<RegulatoryRule, 'id'>);
 
   await logAudit({
-    userId: rule.createdBy,
-    userName: 'Admin',
-    role: 'REGULATORY_ADMIN',
+    userId: user.id,
+    userName: user.name,
+    role: user.role,
     action: 'RULE_CREATED',
     resource: 'RULE',
     resourceId: rule.id,
-    newValue: rule,
+    newValue: { ruleCode: rule.ruleCode, version: rule.version, status: rule.status },
   });
 
-  return NextResponse.json({ success: true, data: rule });
+  return NextResponse.json({ success: true, data: rule }, { status: 201 });
 }

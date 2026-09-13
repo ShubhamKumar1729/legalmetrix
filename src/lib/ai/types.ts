@@ -60,7 +60,14 @@ export interface AIAnalyzeResponse {
 export interface AIModelProvider {
   name: string;
   version: string;
+  /** True when the provider cannot actually read a package (development stand-in). */
+  isDevelopmentProvider?: boolean;
   analyze(request: AIAnalyzeRequest): Promise<AIAnalyzeResponse>;
-  extractText(imageUrl: string): Promise<{ text: string; confidence: number; boundingBoxes: any[] }>;
+  extractText(imageUrl: string): Promise<{
+    text: string;
+    confidence: number;
+    boundingBoxes: BoundingBox[];
+    note?: string;
+  }>;
   healthCheck(): Promise<boolean>;
 }

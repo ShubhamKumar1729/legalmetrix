@@ -9,6 +9,7 @@ coverage/
 
 # Next.js
 .next/
+.next-*/
 out/
 build/
 dist/
@@ -85,6 +86,7 @@ reports/generated/
 !docs/*.pdf
 
 # Cache
+*.tsbuildinfo
 .cache/
 .parcel-cache/
 .eslintcache

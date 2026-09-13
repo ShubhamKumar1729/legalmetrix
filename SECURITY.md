@@ -1,65 +1,89 @@
-# Security — PackComply
+# Security
 
-## Authentication
+## Credentials
 
-- **Password Hashing:** bcryptjs with salt 10
-- **Storage:** passwordHash never returned to client, never in logs
-- **Demo Password:** `Gov@2026` for all demo users, hashed via bcrypt
-- **JWT:** `jsonwebtoken` with `AUTH_SECRET` (min 32 chars), expiry 7d via `AUTH_EXPIRES_IN`
-- **Token Verification:** `verifyToken()` checks signature, expiry
-- **Session:** For demo, token in localStorage; production should use httpOnly secure cookie + CSRF protection
+**There are no built-in accounts and no hard-coded credentials anywhere in this
+repository** — not in source, not in seed data (there is none), not in fixtures, not
+in comments, not in documentation.
 
-## RBAC
+The first administrator is created in one of two ways:
 
-### Roles
+1. `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD` in the environment, applied
+   only when the user collection is empty and never re-applied afterwards.
+2. **Admin → Users** by an existing administrator.
 
-- `SUPER_ADMIN` — full access
-- `REGULATORY_ADMIN` — rules, publishing, config, audit read
-- `ENFORCEMENT_OFFICER` — create inspections, view own, submit, view reports, ecommerce
-- `REVIEWER` — review findings, modify AI results, approve/reject
-- `ANALYST` — view analytics, export
-- `AUDITOR` — view audit logs, historical records, no modification
+`.env.example` ships with empty placeholders only. `.env` and its local variants are
+gitignored. If you suspect a bootstrap password has leaked, rotate it via
+`PATCH /api/users/:id` and remove the variables from the environment.
 
-### Permission Matrix
+## Passwords and sessions
 
-Defined in `src/lib/auth/rbac.ts` as `rolePermissions: Record<Role, Permission[]>`
+- Passwords are hashed with bcrypt (cost 10). Hashes are never returned by any API
+  route (`publicUser()` strips them).
+- Sessions are signed JWTs (HS256, `AUTH_SECRET`) held in an httpOnly
+  `legalmetrix_session` cookie — not reachable from JavaScript, so a stored-XSS bug
+  cannot steal the token.
+- `AUTH_SECRET` is mandatory in production; the server throws rather than falling back
+  to a development key.
+- Minimum password length for accounts created in the UI is 8 characters. Set a
+  stronger policy at the identity layer if your deployment has one.
 
-Permissions:
-- inspection:create/read/update/delete
-- review:read/write
-- product:read/history
-- rule:read/write/publish
-- analytics:read
-- report:read/write/download
-- user:read/write
-- audit:read
-- config:read/write
-- ecommerce:analyze
+## Authorisation
 
-### Enforcement
+Every route handler starts with `requireUser()` or `requirePermission()`, which return
+a ready-to-send `401` / `403` response:
 
-- **Frontend:** `canAccessRoute()` checks role vs path, redirects to login if no token
-- **Backend:** Every API route should call `hasPermission(role, permission)` — currently implemented for critical routes, TODO for all
-- **Never trust frontend:** Backend is source of truth
+```ts
+const user = requirePermission('review:write');
+if (isResponse(user)) return user;
+```
 
-## Input Validation
+There are no unauthenticated data routes. Evidence images (`GET /api/images/:id`)
+require a session as well.
 
-- **Zod schemas** shared frontend/backend (planned, currently manual validation)
-- **File Validation:** mime type check (image/jpeg, png, webp), size limit (10MB), no executable
-- **Barcode:** alphanumeric, max 50 chars
-- **URL:** valid URL format for ecommerce
-- **Rule DSL:** validated via `evaluateCondition` — only allowed operators, no eval, no Function constructor
+Six backend roles map to a permission matrix in `src/lib/auth/rbac.ts`; the interface
+presents them as Inspector, Reviewer and Admin. Rule publishing is a separate
+permission (`rule:publish`) from rule authoring (`rule:write`).
 
-## File Storage
+## Input validation
 
-- **Abstraction:** `StorageProvider` interface, local dev writes to `./uploads`, prod S3 with presigned URLs
-- **No direct filesystem access** from frontend
-- **Mock URLs** for demo reliability (`/api/placeholder/image`)
-- **Size Limits:** 10MB per image, 10 images max per inspection
+- Rule payloads are validated with Zod, including the recursive validation-logic
+  schema. An invalid operator or missing field is rejected with `400`.
+- The rule evaluator interprets a JSON condition structure. It never compiles or
+  executes a string, so a rule cannot run arbitrary code. Regexes are constructed
+  inside a `try` and a bad pattern fails the condition instead of throwing.
+- Inspection updates are limited to an explicit allow-list of fields.
+- Image ids supplied by a client are checked against storage before being attached to
+  an inspection — a client cannot reference an arbitrary URL as evidence.
 
-## Secure Headers
+## Uploads
 
-Via `next.config.mjs`:
+`inspectImage()` reads the real file bytes and rejects:
+
+| Code                 | Condition                                    |
+| -------------------- | -------------------------------------------- |
+| `EMPTY_FILE`         | zero-length body                             |
+| `FILE_TOO_LARGE`     | over 10 MB                                   |
+| `UNSUPPORTED_FORMAT` | not a genuine JPEG, PNG or WEBP (magic bytes)|
+| `UNREADABLE_IMAGE`   | headers cannot be parsed                     |
+| `TRUNCATED_IMAGE`    | JPEG without `FFD9`, PNG without `IEND`      |
+| `LOW_RESOLUTION`     | shortest side under 320 px                   |
+
+The declared MIME type is not trusted: the format is detected from the bytes. Stored
+files are named with a server-generated UUID and served through
+`GET /api/images/:id`, which validates the id against `^[a-zA-Z0-9-]+$` before
+touching the filesystem, so the parameter cannot traverse directories.
+
+## Audit trail
+
+Every sign-in, sign-out, inspection creation, analysis, review decision, rule change,
+user change, report generation and configuration change is written to `auditlogs`
+with actor, role, resource, old value and new value. No route updates or deletes
+audit entries. Reviewers' corrections store both the AI value and the corrected value.
+
+## Transport and headers
+
+`next.config.mjs` applies to every response:
 
 ```
 X-Frame-Options: DENY
@@ -67,83 +91,22 @@ X-Content-Type-Options: nosniff
 Referrer-Policy: strict-origin-when-cross-origin
 ```
 
-Future: Content-Security-Policy, Strict-Transport-Security, etc.
+The session cookie is `SameSite=Lax` and `Secure` in production. Camera access
+requires a secure context, so field deployments must be served over HTTPS.
 
-## Audit Logging
+## Data handling
 
-- **Immutable:** Logs never updated/deleted by normal admins
-- **Logged Events:** login, logout, inspection creation/update, AI result generated, AI result corrected, finding reviewed, rule created/edited/published, config changed, report generated/downloaded, user role changed
-- **Fields:** timestamp, userId, userName, role, action, resource, resourceId, oldValue, newValue, ip, comment
-- **Storage:** memory + MongoDB, console log for debugging
-- **Read-Only:** Audit log page shows all logs, no edit/delete buttons
+- Evidence images stay in `STORAGE_PATH`; nothing is sent to a third party.
+- The analysis provider receives image ids, same-origin URLs and product metadata
+  only. Point `AI_SERVICE_URL` at an endpoint inside your trust boundary.
+- No analytics or telemetry code is present.
 
-## Evidence Integrity
+## Known limitations
 
-- **Immutable from ordinary users:** Evidence images cannot be replaced without audit entry
-- **Geo-tagged:** Optional latitude/longitude, accuracy, address, capturedAt
-- **Bounding Boxes:** Stored with findings, linked to imageId
-- **Versioning:** If evidence changed, new audit entry with old/new values
-
-## Secrets Management
-
-- **Env Vars:** All secrets via `.env`, never in source
-- **.env.example:** Placeholders only, no real secrets
-- **Frontend:** Only `NEXT_PUBLIC_` vars exposed, no secrets
-- **.gitignore:** Should ignore `.env`, `uploads/`, `node_modules/`
-
-## Rate Limiting (Future)
-
-- Per IP: 100 req/min
-- Per user: 50 req/min for inspections, 10 req/min for AI analyze
-- Implement via middleware or reverse proxy (e.g., Upstash, Redis)
-
-## XSS Protection
-
-- React escapes by default
-- No `dangerouslySetInnerHTML` except for SVG placeholder (safe)
-- No inline event handlers from user input
-- Content Security Policy planned
-
-## CSRF Protection
-
-- For cookie-based auth, need CSRF tokens
-- Currently token in localStorage, so CSRF less relevant, but XSS more critical
-- Production should use httpOnly cookie + SameSite=Strict + CSRF token
-
-## Dependency Security
-
-- `npm audit` regularly
-- Pin versions in package.json
-- No known vulnerabilities in used packages (Next.js 14.2.5, mongoose 8.4.4, etc.)
-
-## Data Privacy
-
-- **Location:** Optional, not required
-- **PII:** Only official IDs, not personal data
-- **Retention:** 365 days configurable, after that archive (not delete for audit)
-- **Demo Data:** Clearly labeled synthetic, no real government records
-
-## Legal Disclaimer
-
-- AI outputs labeled "AI-assisted compliance assessment" not legal authority
-- Final decisions attributable to authorized officials
-- UI shows AI Assessment vs Human Review vs Final Decision separately
-
-## Future Hardening
-
-- 2FA for admins
-- IP allowlisting for gov networks
-- Device fingerprinting
-- Session revocation
-- Password complexity rules
-- Account lockout after 5 failed attempts
-- Encryption at rest for MongoDB
-- TLS everywhere
-- S3 bucket policy with least privilege
-
-## Testing Security
-
-- Auth: valid/invalid credentials, expired token, role escalation attempt
-- RBAC: officer cannot publish rules, auditor cannot create inspections
-- Input: SQL injection (not applicable MongoDB but NoSQL injection check), XSS payloads, file type bypass
-- Audit: verify logs created for all critical actions
+- In-memory mode loses data on restart; it is a sandbox convenience, not a deployment
+  option. Set `MONGODB_URI` for real use.
+- Runtime configuration (`PATCH /api/configuration`) is held in memory for the life of
+  the process. Persist it before running multiple instances.
+- There is no rate limiting; put the application behind a gateway that provides it.
+- Password policy beyond length is not enforced; integrate your identity provider for
+  SSO-grade requirements.

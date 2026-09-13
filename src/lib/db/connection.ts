@@ -1,45 +1,43 @@
 import mongoose from 'mongoose';
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/sih-compliance';
+const MONGODB_URI = process.env.MONGODB_URI || '';
 
-let isConnected = false;
+let attempted = false;
 
+/**
+ * Connect to MongoDB when a connection string is configured.
+ * Returns false (and leaves the app running on the in-memory store) when no URI is
+ * configured or the server is unreachable — never throws.
+ */
 export async function connectDB(): Promise<boolean> {
-  if (isConnected) return true;
-  
-  // If no URI or explicitly disabled, fallback to memory
-  if (!MONGODB_URI || process.env.NEXT_PUBLIC_DEMO_MODE === 'true') {
-    // In demo mode, we use memory store by default, but try mongo if available
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(MONGODB_URI, {
-          serverSelectionTimeoutMS: 2000,
-        });
-        isConnected = true;
-        console.log('MongoDB connected');
-        return true;
-      }
-    } catch (e) {
-      console.log('MongoDB not available, using in-memory store');
-      return false;
+  if (mongoose.connection.readyState === 1) return true;
+  if (!MONGODB_URI) {
+    if (!attempted) {
+      attempted = true;
+      console.info('[db] MONGODB_URI not set — using in-memory store (data is not persisted)');
     }
+    return false;
   }
 
   try {
     if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(MONGODB_URI);
-      isConnected = true;
-      console.log('MongoDB connected');
-    } else {
-      isConnected = true;
+      await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 3000 });
+      console.info('[db] MongoDB connected');
     }
-    return true;
+    return isDBConnected();
   } catch (error) {
-    console.warn('MongoDB connection failed, using in-memory store:', error);
+    if (!attempted) {
+      attempted = true;
+      console.warn('[db] MongoDB unavailable — using in-memory store:', (error as Error).message);
+    }
     return false;
   }
 }
 
-export function isDBConnected() {
-  return isConnected && mongoose.connection.readyState === 1;
+export function isDBConnected(): boolean {
+  return mongoose.connection.readyState === 1;
+}
+
+export function datastoreKind(): 'mongodb' | 'memory' {
+  return isDBConnected() ? 'mongodb' : 'memory';
 }

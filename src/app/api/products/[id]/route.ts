@@ -1,21 +1,38 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
+import { requirePermission, isResponse } from '@/lib/auth/session';
+import { db } from '@/lib/db/repository';
+import { calculateRiskScore } from '@/lib/rules/scoring';
 
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
-  await seedMemoryDB();
-  const product = await memoryDB.products.findById(params.id);
+export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+  const user = requirePermission('product:read');
+  if (isResponse(user)) return user;
+
+  const product = await db.products.get(params.id);
   if (!product) {
-    // Try by name
-    const all = memoryDB.products.all();
-    const byName = all.find((p: any) => p.name.toLowerCase().includes(params.id.toLowerCase()));
-    if (byName) {
-      const inspections = memoryDB.inspections.all().filter((i: any) => i.productId === byName.id || i.productName === byName.name);
-      return NextResponse.json({ success: true, data: { product: byName, inspections } });
-    }
-    return NextResponse.json({ success: false, error: { message: 'Not found' } }, { status: 404 });
+    return NextResponse.json({ success: false, error: { message: 'Product not found' } }, { status: 404 });
   }
 
-  const inspections = memoryDB.inspections.all().filter((i: any) => i.productId === product.id || i.productName === (product as any).name);
+  const inspections = (await db.inspections.list({}, { sortDescBy: 'createdAt' })).filter(
+    (i) => i.productId === product.id || i.productName === product.name
+  );
+  const analyzed = inspections.filter((i) => i.status !== 'DRAFT' && i.status !== 'PROCESSING');
 
-  return NextResponse.json({ success: true, data: { product, inspections } });
+  return NextResponse.json({
+    success: true,
+    data: {
+      product: {
+        ...product,
+        inspectionCount: inspections.length,
+        violationCount: analyzed.filter((i) => i.status === 'NON_COMPLIANT').length,
+        riskScore: calculateRiskScore(analyzed),
+      },
+      history: inspections,
+      trend: analyzed.map((i) => ({
+        date: i.createdAt,
+        score: i.scored ? i.complianceScore : null,
+        status: i.status,
+        inspectionNumber: i.inspectionNumber,
+      })),
+    },
+  });
 }

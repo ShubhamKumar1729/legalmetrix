@@ -1,69 +1,81 @@
 import { NextResponse } from 'next/server';
-import { memoryDB, seedMemoryDB } from '@/lib/db/memory-store';
+import { requirePermission, isResponse } from '@/lib/auth/session';
+import { db } from '@/lib/db/repository';
 
+/**
+ * Every number here is computed from stored inspection records.
+ * Nothing is randomised, extrapolated or filled in — an empty database yields zeros.
+ */
 export async function GET() {
-  await seedMemoryDB();
-  const inspections = memoryDB.inspections.all();
-  const products = memoryDB.products.all();
+  const user = requirePermission('analytics:read');
+  if (isResponse(user)) return user;
 
+  const [inspections, products, reports, rules] = await Promise.all([
+    db.inspections.list({}, { sortDescBy: 'createdAt' }),
+    db.products.list(),
+    db.reports.list(),
+    db.rules.list(),
+  ]);
+
+  const scored = inspections.filter((i) => i.scored);
   const total = inspections.length;
-  const compliant = inspections.filter(i => i.status === 'COMPLIANT').length;
-  const violations = inspections.filter(i => i.status === 'NON_COMPLIANT').length;
-  const reviewRequired = inspections.filter(i => i.status === 'REVIEW_REQUIRED').length;
+  const compliant = inspections.filter((i) => i.status === 'COMPLIANT').length;
+  const violations = inspections.filter((i) => i.status === 'NON_COMPLIANT').length;
+  const reviewRequired = inspections.filter((i) => i.status === 'REVIEW_REQUIRED').length;
+  const pendingFindings = inspections.flatMap((i) => i.findings).filter((f) => f.reviewStatus === 'PENDING').length;
 
-  const complianceRate = total > 0 ? Math.round((compliant / total) * 100) : 0;
-  const avgConfidence = inspections.length > 0 ? Math.round(inspections.reduce((sum, i) => sum + (i.confidenceSummary?.average || 0), 0) / inspections.length) : 0;
+  const complianceRate = scored.length > 0 ? Math.round((compliant / scored.length) * 100) : 0;
+  const avgConfidence =
+    scored.length > 0
+      ? Math.round(scored.reduce((sum, i) => sum + (i.confidenceSummary?.average || 0), 0) / scored.length)
+      : 0;
 
-  // Violation categories
-  const violationCategories = inspections.flatMap(i => i.findings)
-    .filter(f => f.status === 'VIOLATION')
-    .reduce((acc: any, f) => {
-      acc[f.declarationType] = (acc[f.declarationType] || 0) + 1;
+  const violationCategories = inspections
+    .flatMap((i) => i.findings)
+    .filter((f) => f.status === 'VIOLATION')
+    .reduce<Record<string, number>>((acc, f) => {
+      acc[f.title || f.declarationType] = (acc[f.title || f.declarationType] || 0) + 1;
       return acc;
     }, {});
 
-  // Inspections over time (last 7 days)
-  const overTime = Array.from({ length: 7 }, (_, i) => {
-    const date = new Date();
-    date.setDate(date.getDate() - (6 - i));
-    const dateStr = date.toISOString().split('T')[0];
-    const dayInspections = inspections.filter(ins => ins.createdAt.startsWith(dateStr));
-    return {
-      date: dateStr,
-      inspections: dayInspections.length || Math.floor(Math.random() * 5) + 1,
-      compliant: dayInspections.filter(ins => ins.status === 'COMPLIANT').length,
-      violations: dayInspections.filter(ins => ins.status === 'NON_COMPLIANT').length,
-    };
-  });
-
-  // Repeat offenders
-  const manufacturerMap = inspections.reduce((acc: any, ins) => {
-    if (!acc[ins.manufacturer]) {
-      acc[ins.manufacturer] = { manufacturer: ins.manufacturer, inspections: 0, violations: 0, lastInspection: ins.createdAt };
-    }
-    acc[ins.manufacturer].inspections++;
-    if (ins.status === 'NON_COMPLIANT') acc[ins.manufacturer].violations++;
-    if (new Date(ins.createdAt) > new Date(acc[ins.manufacturer].lastInspection)) {
-      acc[ins.manufacturer].lastInspection = ins.createdAt;
-    }
+  const categoryDistribution = inspections.reduce<Record<string, number>>((acc, i) => {
+    acc[i.category || 'OTHER'] = (acc[i.category || 'OTHER'] || 0) + 1;
     return acc;
   }, {});
 
-  const repeatOffenders = Object.values(manufacturerMap)
-    .map((m: any) => ({
+  // Real activity per day for the last 14 days. Days without activity stay at zero.
+  const days: { date: string; inspections: number; compliant: number; violations: number }[] = [];
+  for (let offset = 13; offset >= 0; offset -= 1) {
+    const day = new Date();
+    day.setUTCDate(day.getUTCDate() - offset);
+    const date = day.toISOString().slice(0, 10);
+    const dayInspections = inspections.filter((i) => (i.createdAt || '').slice(0, 10) === date);
+    days.push({
+      date,
+      inspections: dayInspections.length,
+      compliant: dayInspections.filter((i) => i.status === 'COMPLIANT').length,
+      violations: dayInspections.filter((i) => i.status === 'NON_COMPLIANT').length,
+    });
+  }
+
+  const manufacturers = Object.values(
+    inspections.reduce<Record<string, { manufacturer: string; inspections: number; violations: number; lastInspection: string }>>(
+      (acc, i) => {
+        const key = i.manufacturer || 'Unknown';
+        if (!acc[key]) acc[key] = { manufacturer: key, inspections: 0, violations: 0, lastInspection: i.createdAt };
+        acc[key].inspections += 1;
+        if (i.status === 'NON_COMPLIANT') acc[key].violations += 1;
+        if (i.createdAt > acc[key].lastInspection) acc[key].lastInspection = i.createdAt;
+        return acc;
+      },
+      {}
+    )
+  )
+    .map((m) => ({
       ...m,
       violationRate: Math.round((m.violations / m.inspections) * 100),
-      riskScore: Math.min(100, m.violations * 20 + m.inspections * 2),
-      trend: m.violations > 2 ? 'increasing' : 'stable',
     }))
-    .sort((a: any, b: any) => b.riskScore - a.riskScore)
-    .slice(0, 10);
-
-  // Category distribution
-  const categoryDist = inspections.reduce((acc: any, ins) => {
-    acc[ins.category] = (acc[ins.category] || 0) + 1;
-    return acc;
-  }, {});
+    .sort((a, b) => b.violations - a.violations || b.inspections - a.inspections);
 
   return NextResponse.json({
     success: true,
@@ -75,14 +87,16 @@ export async function GET() {
         reviewRequired,
         complianceRate,
         avgConfidence,
-        pendingReviews: reviewRequired,
-        repeatOffenders: repeatOffenders.filter((r: any) => r.riskScore > 50).length,
+        pendingReviews: pendingFindings,
+        products: products.length,
+        reports: reports.length,
+        rulesPublished: rules.filter((r) => r.enabled && r.status === 'PUBLISHED').length,
       },
-      overTime,
+      hasData: total > 0,
+      overTime: days,
       violationCategories: Object.entries(violationCategories).map(([name, value]) => ({ name, value })),
-      categoryDistribution: Object.entries(categoryDist).map(([name, value]) => ({ name, value })),
-      repeatOffenders,
-      recentInspections: inspections.slice(0, 5),
-    }
+      categoryDistribution: Object.entries(categoryDistribution).map(([name, value]) => ({ name, value })),
+      manufacturers,
+    },
   });
 }

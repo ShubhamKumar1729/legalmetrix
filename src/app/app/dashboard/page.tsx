@@ -1,233 +1,306 @@
-"use client";
+'use client';
+
 import { useEffect, useState } from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import Link from 'next/link';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ClipboardList,
+  Clock,
+  Package,
+  PlusCircle,
+  Scale,
+} from 'lucide-react';
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { 
-  ClipboardList, CheckCircle2, AlertTriangle, Clock, 
-  TrendingUp, MapPin, Package, ArrowUpRight, ScanLine,
-  Eye, FileText
-} from 'lucide-react';
-import Link from 'next/link';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line } from 'recharts';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { EmptyState } from '@/components/ui/empty-state';
+import { useSession } from '@/components/session-provider';
+import { formatDate, formatDay, STATUS_LABEL, statusVariant } from '@/lib/labels';
+import type { DashboardKPIs, Inspection } from '@/types';
+
+interface AnalyticsResponse {
+  kpis: DashboardKPIs;
+  hasData: boolean;
+  overTime: { date: string; inspections: number; compliant: number; violations: number }[];
+  categoryDistribution: { name: string; value: number }[];
+}
+
+const PIE_COLORS = ['#10b981', '#ef4444', '#f59e0b'];
 
 export default function DashboardPage() {
-  const [data, setData] = useState<any>(null);
-  const [inspections, setInspections] = useState<any[]>([]);
+  const { session } = useSession();
+  const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
+  const [inspections, setInspections] = useState<Inspection[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function load() {
       try {
-        const [analyticsRes, inspectionsRes] = await Promise.all([
-          fetch('/api/analytics').then(r => r.json()),
-          fetch('/api/inspections?limit=10').then(r => r.json()),
+        const [analyticsBody, inspectionsBody] = await Promise.all([
+          fetch('/api/analytics', { cache: 'no-store' }).then((res) => res.json()),
+          fetch('/api/inspections?limit=5', { cache: 'no-store' }).then((res) => res.json()),
         ]);
-        if (analyticsRes.success) setData(analyticsRes.data);
-        if (inspectionsRes.success) setInspections(inspectionsRes.data.inspections);
-      } catch (e) {
-        console.error(e);
+        if (analyticsBody.success) setAnalytics(analyticsBody.data);
+        if (inspectionsBody.success) setInspections(inspectionsBody.data.inspections || []);
       } finally {
         setLoading(false);
       }
     }
-    load();
+    void load();
   }, []);
 
   if (loading) {
-    return <div className="space-y-6 animate-pulse">
-      <div className="grid grid-cols-4 gap-4">{[1,2,3,4].map(i => <div key={i} className="h-28 bg-muted rounded-xl" />)}</div>
-      <div className="h-96 bg-muted rounded-xl" />
-    </div>;
+    return (
+      <div className="animate-pulse space-y-6">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="h-24 rounded-xl bg-muted" />
+          ))}
+        </div>
+        <div className="h-80 rounded-xl bg-muted" />
+      </div>
+    );
   }
 
-  const kpis = data?.kpis || { totalInspections: 0, compliant: 0, violations: 0, reviewRequired: 0, complianceRate: 0, avgConfidence: 0, pendingReviews: 0, repeatOffenders: 0 };
+  const kpis = analytics?.kpis;
+  const hasData = Boolean(analytics?.hasData);
 
-  const COLORS = ['#10b981', '#ef4444', '#f59e0b', '#3b82f6'];
+  const distribution = [
+    { name: 'Compliant', value: kpis?.compliant ?? 0 },
+    { name: 'Violations', value: kpis?.violations ?? 0 },
+    { name: 'Review', value: kpis?.reviewRequired ?? 0 },
+  ].filter((entry) => entry.value > 0);
+
+  const firstName = session?.user.name?.split(' ')[0] || '';
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Enforcement Dashboard</h1>
-          <p className="text-sm text-muted-foreground">Legal Metrology • Packaged Commodities Rules, 2011 • Real-time intelligence</p>
+          <h1 className="text-2xl font-bold tracking-tight">
+            {hasData ? `Welcome back${firstName ? `, ${firstName}` : ''}` : 'Welcome to LegalMetrix'}
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {hasData
+              ? 'Packaged commodity compliance under the Legal Metrology (Packaged Commodities) Rules, 2011.'
+              : 'Start your first inspection to begin building your compliance records.'}
+          </p>
         </div>
-        <div className="flex gap-2">
-          <Link href="/app/scan"><Button className="rounded-full"><ScanLine className="w-4 h-4 mr-2" />New Inspection</Button></Link>
-          <Link href="/app/reports"><Button variant="outline" className="rounded-full">Reports</Button></Link>
-        </div>
+        <Link href="/app/inspections/new">
+          <Button size="lg" className="h-12 rounded-full px-6">
+            <PlusCircle className="h-4 w-4" /> Start New Inspection
+          </Button>
+        </Link>
       </div>
 
-      {/* KPIs */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card className="border-0 shadow-sm bg-white">
-          <CardContent className="p-5">
-            <div className="flex justify-between">
-              <div><div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Total Inspections</div><div className="text-3xl font-bold mt-2">{kpis.totalInspections}</div><div className="text-xs text-emerald-600 mt-1 flex items-center gap-1"><TrendingUp className="w-3 h-3" /> +12% vs last month</div></div>
-              <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center"><ClipboardList className="w-5 h-5" /></div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="border-0 shadow-sm bg-white">
-          <CardContent className="p-5">
-            <div className="flex justify-between">
-              <div><div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Compliant</div><div className="text-3xl font-bold mt-2 text-emerald-600">{kpis.compliant}</div><div className="text-xs text-muted-foreground mt-1">{kpis.complianceRate}% compliance rate</div></div>
-              <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center"><CheckCircle2 className="w-5 h-5" /></div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="border-0 shadow-sm bg-white">
-          <CardContent className="p-5">
-            <div className="flex justify-between">
-              <div><div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Violations</div><div className="text-3xl font-bold mt-2 text-red-600">{kpis.violations}</div><div className="text-xs text-muted-foreground mt-1">Critical & high severity</div></div>
-              <div className="w-10 h-10 rounded-xl bg-red-50 text-red-600 flex items-center justify-center"><AlertTriangle className="w-5 h-5" /></div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="border-0 shadow-sm bg-white">
-          <CardContent className="p-5">
-            <div className="flex justify-between">
-              <div><div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Review Required</div><div className="text-3xl font-bold mt-2 text-amber-600">{kpis.reviewRequired}</div><div className="text-xs text-muted-foreground mt-1">Avg confidence {kpis.avgConfidence}%</div></div>
-              <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center"><Clock className="w-5 h-5" /></div>
-            </div>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        {[
+          { label: 'Total Inspections', value: kpis?.totalInspections ?? 0, icon: ClipboardList, tone: 'bg-slate-900 text-white' },
+          {
+            label: 'Compliance Rate',
+            value: `${kpis?.complianceRate ?? 0}%`,
+            hint: `${kpis?.compliant ?? 0} compliant`,
+            icon: CheckCircle2,
+            tone: 'bg-emerald-50 text-emerald-600',
+          },
+          {
+            label: 'Review Required',
+            value: kpis?.reviewRequired ?? 0,
+            hint: `${kpis?.pendingReviews ?? 0} findings awaiting review`,
+            icon: Clock,
+            tone: 'bg-amber-50 text-amber-600',
+          },
+          { label: 'Violations', value: kpis?.violations ?? 0, icon: AlertTriangle, tone: 'bg-red-50 text-red-600' },
+        ].map((kpi) => (
+          <Card key={kpi.label} className="border-0 bg-white shadow-sm">
+            <CardContent className="p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+                    {kpi.label}
+                  </div>
+                  <div className="mt-2 text-3xl font-bold">{kpi.value}</div>
+                  {kpi.hint && <div className="mt-1 text-xs text-muted-foreground">{kpi.hint}</div>}
+                </div>
+                <div className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl ${kpi.tone}`}>
+                  <kpi.icon className="h-5 w-5" />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
       </div>
 
-      <div className="grid lg:grid-cols-3 gap-6">
-        <Card className="lg:col-span-2 border-0 shadow-sm">
-          <CardHeader className="pb-2"><CardTitle className="text-base">Inspections Over Time</CardTitle></CardHeader>
-          <CardContent>
-            <div className="h-[280px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data?.overTime || []}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                  <XAxis dataKey="date" fontSize={11} tickFormatter={(v) => v.slice(5)} />
-                  <YAxis fontSize={11} />
-                  <Tooltip />
-                  <Bar dataKey="inspections" fill="#0f172a" radius={[4,4,0,0]} />
-                  <Bar dataKey="compliant" fill="#10b981" radius={[4,4,0,0]} />
-                  <Bar dataKey="violations" fill="#ef4444" radius={[4,4,0,0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="border-0 shadow-sm">
-          <CardHeader className="pb-2"><CardTitle className="text-base">Compliance Distribution</CardTitle></CardHeader>
-          <CardContent>
-            <div className="h-[280px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={[
-                    { name: 'Compliant', value: kpis.compliant },
-                    { name: 'Violations', value: kpis.violations },
-                    { name: 'Review', value: kpis.reviewRequired },
-                  ]} cx="50%" cy="50%" innerRadius={60} outerRadius={90} dataKey="value">
-                    {[
-                      { name: 'Compliant', value: kpis.compliant },
-                      { name: 'Violations', value: kpis.violations },
-                      { name: 'Review', value: kpis.reviewRequired },
-                    ].map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="flex justify-center gap-4 text-xs">
-              <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" />Compliant</span>
-              <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500" />Violation</span>
-              <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-amber-500" />Review</span>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid lg:grid-cols-3 gap-6">
-        <Card className="lg:col-span-2 border-0 shadow-sm">
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-base">Recent Inspections</CardTitle>
-            <Link href="/app/products"><Button variant="ghost" size="sm" className="h-7">View all <ArrowUpRight className="w-3 h-3 ml-1" /></Button></Link>
-          </CardHeader>
-          <CardContent className="p-0">
+      <Card className="border-0 bg-white shadow-sm">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Recent Inspections</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {inspections.length === 0 ? (
+            <EmptyState
+              icon={ClipboardList}
+              title="No inspections yet"
+              description="Create an inspection to capture package images and check them against the configured rules."
+              action={
+                <Link href="/app/inspections/new">
+                  <Button className="rounded-full">
+                    <PlusCircle className="h-4 w-4" /> Start New Inspection
+                  </Button>
+                </Link>
+              }
+            />
+          ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead className="text-xs text-muted-foreground border-b bg-muted/30">
-                  <tr><th className="text-left p-3 font-medium">Inspection ID</th><th className="text-left p-3 font-medium">Product</th><th className="text-left p-3 font-medium">Manufacturer</th><th className="text-left p-3 font-medium">Score</th><th className="text-left p-3 font-medium">Status</th><th className="text-left p-3 font-medium">Confidence</th><th className="text-left p-3 font-medium">Action</th></tr>
+                <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
+                  <tr>
+                    <th className="p-3 text-left font-medium">Inspection</th>
+                    <th className="p-3 text-left font-medium">Product</th>
+                    <th className="hidden p-3 text-left font-medium sm:table-cell">Manufacturer</th>
+                    <th className="p-3 text-left font-medium">Status</th>
+                    <th className="hidden p-3 text-right font-medium sm:table-cell">Score</th>
+                    <th className="hidden p-3 text-right font-medium md:table-cell">Created</th>
+                  </tr>
                 </thead>
                 <tbody>
-                  {inspections.map((insp: any) => (
-                    <tr key={insp.id} className="border-b last:border-0 hover:bg-muted/30">
-                      <td className="p-3 font-mono text-xs">{insp.inspectionId}</td>
-                      <td className="p-3"><div className="font-medium">{insp.productName}</div><div className="text-xs text-muted-foreground">{insp.brand}</div></td>
-                      <td className="p-3 text-xs max-w-[150px] truncate">{insp.manufacturer}</td>
-                      <td className="p-3"><span className={`font-bold ${insp.complianceScore >= 80 ? 'text-emerald-600' : insp.complianceScore >= 50 ? 'text-amber-600' : 'text-red-600'}`}>{insp.complianceScore}</span></td>
-                      <td className="p-3"><Badge variant={insp.status === 'COMPLIANT' ? 'compliant' : insp.status === 'NON_COMPLIANT' ? 'violation' : insp.status === 'REVIEW_REQUIRED' ? 'review' : 'secondary'} className="text-[10px]">{insp.status}</Badge></td>
-                      <td className="p-3 text-xs">{insp.confidenceSummary?.average || 0}%</td>
-                      <td className="p-3"><Link href={`/app/scan/${insp.id}`}><Button variant="ghost" size="icon" className="h-7 w-7"><Eye className="w-3 h-3" /></Button></Link></td>
+                  {inspections.map((inspection) => (
+                    <tr key={inspection.id} className="border-b last:border-0 hover:bg-muted/20">
+                      <td className="p-3">
+                        <Link href={`/app/inspections/${inspection.id}`} className="font-medium hover:underline">
+                          {inspection.inspectionNumber}
+                        </Link>
+                      </td>
+                      <td className="p-3">{inspection.productName}</td>
+                      <td className="hidden p-3 text-muted-foreground sm:table-cell">{inspection.manufacturer}</td>
+                      <td className="p-3">
+                        <Badge variant={statusVariant(inspection.status)} className="text-[10px]">
+                          {STATUS_LABEL[inspection.status] || inspection.status}
+                        </Badge>
+                      </td>
+                      <td className="hidden p-3 text-right font-medium sm:table-cell">
+                        {inspection.scored ? `${inspection.complianceScore}/100` : '—'}
+                      </td>
+                      <td className="hidden p-3 text-right text-muted-foreground md:table-cell">
+                        {formatDate(inspection.createdAt)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          </CardContent>
-        </Card>
+          )}
+        </CardContent>
+      </Card>
 
-        <Card className="border-0 shadow-sm">
-          <CardHeader className="pb-2"><CardTitle className="text-base">Repeat Offenders • Risk</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            {(data?.repeatOffenders || []).slice(0, 5).map((off: any) => (
-              <div key={off.manufacturer} className="flex items-center justify-between p-3 rounded-xl border bg-white">
-                <div className="min-w-0 flex-1">
-                  <div className="font-medium text-sm truncate">{off.manufacturer}</div>
-                  <div className="text-xs text-muted-foreground">{off.inspections} inspections • {off.violations} violations</div>
-                </div>
-                <div className="text-right ml-3">
-                  <div className={`text-sm font-bold ${off.riskScore > 70 ? 'text-red-600' : off.riskScore > 40 ? 'text-amber-600' : 'text-emerald-600'}`}>{off.riskScore}</div>
-                  <div className="text-[10px] text-muted-foreground">RISK</div>
-                </div>
+      <div className="grid gap-6 lg:grid-cols-3">
+        <Card className="border-0 bg-white shadow-sm lg:col-span-2">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Compliance Overview</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!hasData ? (
+              <p className="py-10 text-center text-sm text-muted-foreground">
+                Analytics will appear after inspections are completed.
+              </p>
+            ) : (
+              <div className="h-[280px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={analytics?.overTime || []}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                    <XAxis dataKey="date" fontSize={11} tickFormatter={(value: string) => formatDay(value)} />
+                    <YAxis fontSize={11} allowDecimals={false} />
+                    <Tooltip />
+                    <Bar dataKey="compliant" name="Compliant" fill="#10b981" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="violations" name="Violations" fill="#ef4444" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
-            ))}
-            <Link href="/app/analytics"><Button variant="outline" size="sm" className="w-full rounded-full">View Intelligence</Button></Link>
+            )}
           </CardContent>
         </Card>
-      </div>
 
-      <div className="grid md:grid-cols-3 gap-4">
-        <Card className="border-0 shadow-sm bg-slate-900 text-white">
-          <CardContent className="p-5">
-            <div className="flex items-center gap-3 mb-3"><div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center"><Package className="w-4 h-4" /></div><div className="text-sm font-medium">Violation Categories</div></div>
-            <div className="space-y-2">
-              {(data?.violationCategories || []).slice(0, 4).map((cat: any) => (
-                <div key={cat.name} className="flex justify-between text-sm"><span className="text-slate-400">{cat.name}</span><span className="font-medium">{cat.value}</span></div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="border-0 shadow-sm">
-          <CardContent className="p-5">
-            <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">System Health</div>
-            <div className="space-y-3 text-sm">
-              <div className="flex justify-between"><span>Mock AI Provider</span><Badge variant="compliant" className="text-[10px]">Active • v0.1.0</Badge></div>
-              <div className="flex justify-between"><span>Rule Engine</span><Badge variant="compliant" className="text-[10px]">v1.2 Published</Badge></div>
-              <div className="flex justify-between"><span>Storage</span><Badge variant="secondary" className="text-[10px]">Local • S3 Ready</Badge></div>
-              <div className="flex justify-between"><span>Audit Log</span><Badge variant="secondary" className="text-[10px]">Immutable</Badge></div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="border-0 shadow-sm bg-blue-600 text-white">
-          <CardContent className="p-5">
-            <div className="text-sm font-medium mb-2">Demo Mode</div>
-            <div className="text-xs text-blue-100 leading-relaxed">Deterministic mock AI ensures reliable jury demo. Real model plugs via AIModelProvider interface without UI rebuild.</div>
-            <div className="mt-4 flex gap-2">
-              <Badge className="bg-white text-blue-600 border-0 text-[10px]">MockAIProvider</Badge>
-              <Badge className="bg-blue-500 text-white border-0 text-[10px]">Pluggable</Badge>
-            </div>
-          </CardContent>
-        </Card>
+        <div className="space-y-6">
+          <Card className="border-0 bg-white shadow-sm">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Compliance Distribution</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {distribution.length === 0 ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">No analyzed inspections yet.</p>
+              ) : (
+                <>
+                  <div className="h-[200px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie data={distribution} dataKey="value" innerRadius={50} outerRadius={80}>
+                          {distribution.map((entry, index) => (
+                            <Cell key={entry.name} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="flex flex-wrap justify-center gap-3 text-xs">
+                    {distribution.map((entry, index) => (
+                      <span key={entry.name} className="flex items-center gap-1.5">
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ backgroundColor: PIE_COLORS[index % PIE_COLORS.length] }}
+                        />
+                        {entry.name} ({entry.value})
+                      </span>
+                    ))}
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="border-0 bg-white shadow-sm">
+            <CardContent className="space-y-3 p-5 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2 text-muted-foreground">
+                  <Package className="h-4 w-4" /> Products
+                </span>
+                <span className="font-semibold">{kpis?.products ?? 0}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2 text-muted-foreground">
+                  <ClipboardList className="h-4 w-4" /> Reports generated
+                </span>
+                <span className="font-semibold">{kpis?.reports ?? 0}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2 text-muted-foreground">
+                  <Scale className="h-4 w-4" /> Rules published
+                </span>
+                <span className="font-semibold">{kpis?.rulesPublished ?? 0}</span>
+              </div>
+              {(kpis?.rulesPublished ?? 0) === 0 && (
+                <p className="rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800">
+                  No rules are published yet, so inspections cannot be scored.{' '}
+                  <Link href="/app/rules" className="font-medium underline">
+                    Configure rules
+                  </Link>
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </div>
   );
